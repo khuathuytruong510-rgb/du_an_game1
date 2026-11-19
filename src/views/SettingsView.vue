@@ -31,7 +31,7 @@
           {{ playerStore.authLoading ? 'Đang xử lý…' : 'Đăng xuất' }}
         </button>
       </template>
-      <form v-else @submit.prevent="submitAccount">
+      <form v-else ref="accountForm" @submit.prevent="submitAccount">
         <label>
           Email
           <input
@@ -41,6 +41,7 @@
             maxlength="254"
             required
             :disabled="playerStore.authLoading || submitting"
+            @input="clearAccountFormStatus"
           />
         </label>
         <label>
@@ -53,9 +54,13 @@
             maxlength="128"
             required
             :disabled="playerStore.authLoading || submitting"
+            @input="clearAccountFormStatus"
           />
           <small>Mật khẩu cần từ 12 ký tự.</small>
         </label>
+        <p v-if="accountFormStatus" class="account-form-error" role="alert">
+          {{ accountFormStatus }}
+        </p>
         <div class="account-actions">
           <button type="submit" :disabled="playerStore.authLoading || submitting">
             {{ playerStore.authLoading || submitting ? 'Đang xử lý…' : 'Đăng nhập' }}
@@ -116,32 +121,45 @@ const showResetConfirm = ref(false)
 const email = ref('')
 const password = ref('')
 const submitting = ref(false)
+const accountForm = ref<HTMLFormElement | null>(null)
+const accountFormStatus = ref('')
+
+const clearAccountFormStatus = () => {
+  accountFormStatus.value = ''
+}
 
 const returnToRequestedRoute = async () => {
   const redirect = route.query.redirect
-  if (
-    playerStore.accountEmail &&
+  if (!playerStore.accountEmail) return
+
+  const destination =
     typeof redirect === 'string' &&
     redirect.startsWith('/') &&
     !redirect.startsWith('//')
-  ) {
-    await router.replace(redirect)
-  }
+      ? redirect
+      : '/'
+  await router.replace(destination)
 }
 
 const submitAccount = async () => {
+  accountFormStatus.value = ''
   submitting.value = true
   await playerStore.login(email.value, password.value)
-  password.value = ''
+  if (playerStore.accountEmail) password.value = ''
   submitting.value = false
   await returnToRequestedRoute()
 }
 
 const createAccount = async () => {
-  if (!email.value || password.value.length < 12) return
+  accountFormStatus.value = ''
+  if (!accountForm.value?.reportValidity()) {
+    accountFormStatus.value = 'Vui lòng nhập email hợp lệ và mật khẩu từ 12 ký tự trở lên.'
+    return
+  }
+
   submitting.value = true
   await playerStore.register(email.value, password.value)
-  password.value = ''
+  if (playerStore.accountEmail) password.value = ''
   submitting.value = false
   await returnToRequestedRoute()
 }
@@ -204,6 +222,12 @@ const confirmNewGame = () => {
 
 .account-panel small {
   color: #b6c1ce;
+}
+
+.account-form-error {
+  margin: 8px 0;
+  color: #ffe2dd;
+  font-size: 13px;
 }
 
 .account-actions {

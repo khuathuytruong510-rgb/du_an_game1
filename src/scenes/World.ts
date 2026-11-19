@@ -1,850 +1,347 @@
 import Phaser from 'phaser'
 import { usePlayerStore } from '../stores/player'
-import {
-  AutoBattleSystem,
-  type ApproachResult,
-  type AutoState,
-  type Monster
-} from '../game/systems/AutoBattleSystem'
 import { rollGoldReward } from '../game/systems/rewards'
-import type { TouchDirection } from '../game/types'
 
-interface MonsterView {
-  data: Monster
-  body: Phaser.GameObjects.Arc
-  label: Phaser.GameObjects.Text
-  healthBar: Phaser.GameObjects.Graphics
-  selectionMarker: Phaser.GameObjects.Graphics
-  color: number
-  attackDamage: number
-  attackCooldown: number
-  nextAttackAt: number
-  minGold: number
-  maxGold: number
-  respawnAt: number | null
-}
+type Platform = { x: number; y: number; width: number; height: number }
+type Coin = { body: Phaser.GameObjects.Arc; shine: Phaser.GameObjects.Arc; taken: boolean }
+type Foe = { body: Phaser.GameObjects.Container; min: number; max: number; direction: number; alive: boolean }
 
-const PLAYER_RESPAWN_DELAY = 3000
-const MONSTER_ATTACK_RANGE = 86
-const AUTO_POTION_COOLDOWN = 2000
+const WIDTH = 2600
+const HEIGHT = 700
+const PLAYER_SPEED = 260
+const PLAYER_JUMP = 590
 
 export default class WorldScene extends Phaser.Scene {
-  private readonly playerStore = usePlayerStore()
-  private readonly playerPosition = { x: 120, y: 0 }
-  private playerBody!: Phaser.GameObjects.Arc
-  private playerLabel!: Phaser.GameObjects.Text
-  private pointClickMarker!: Phaser.GameObjects.Graphics
-  private blacksmithBody!: Phaser.GameObjects.Rectangle
-  private blacksmithHead!: Phaser.GameObjects.Arc
-  private blacksmithLabel!: Phaser.GameObjects.Text
-  private autoBattle!: AutoBattleSystem
-  private monsters: MonsterView[] = []
-  private readonly touchDirections = new Set<TouchDirection>()
-  private keys!: Record<
-    'up' | 'down' | 'left' | 'right' | 'arrowUp' | 'arrowDown' | 'arrowLeft' | 'arrowRight',
-    Phaser.Input.Keyboard.Key
-  >
-  private groundY = 0
-  private worldWidth = 0
-  private manaRegenElapsed = 0
-  private cooldownUiElapsed = 0
-  private nextAutoPotionAt = 0
-  private manualApproachActive = false
-  private manualApproachTargetId: string | null = null
-  private pointClickDestination: number | null = null
-  private playerRespawnAt: number | null = null
-  private observedLevel = 1
-  private shutdownHandled = false
-
-  constructor() {
-    super({ key: 'World' })
+  private readonly store = usePlayerStore()
+  private player!: Phaser.GameObjects.Container
+  private playerGraphics!: Phaser.GameObjects.Graphics
+  private platforms: Platform[] = []
+  private readonly spikePositions = [475, 1090, 1330, 1675, 2210]
+  private coins: Coin[] = []
+  private foes: Foe[] = []
+  private keys!: Record<'left' | 'right' | 'leftArrow' | 'rightArrow' | 'jump' | 'up' | 'attack' | 'pause', Phaser.Input.Keyboard.Key>
+  private velocityY = 0
+  private grounded = false
+  private facing = 1
+  private paused = true
+  private ended = false
+  private hearts = 3
+  private score = 0
+  private checkpoint = 110
+  private jumpQueued = false
+  private attackQueued = false
+  private overlay!: Phaser.GameObjects.Container
+  private overlayText!: Phaser.GameObjects.Text
+  private overlayButtonLabel!: Phaser.GameObjects.Text
+  private hud!: Phaser.GameObjects.Text
+  private touchLeft = false
+  private touchRight = false
+  private touchJump = false
+  private touchAttack = false
+  private touchEvents = {
+    left: (pressed: boolean) => { this.touchLeft = pressed },
+    right: (pressed: boolean) => { this.touchRight = pressed },
+    jump: (pressed: boolean) => { if (pressed) this.jumpQueued = true; this.touchJump = pressed },
+    attack: (pressed: boolean) => { if (pressed) this.attackQueued = true; this.touchAttack = pressed }
   }
 
+  constructor() { super({ key: 'World' }) }
+
   create() {
-    this.shutdownHandled = false
-    this.playerPosition.x = 120
-    this.manaRegenElapsed = 0
-    this.cooldownUiElapsed = 0
-    this.nextAutoPotionAt = 0
-    this.manualApproachActive = false
-    this.manualApproachTargetId = null
-    this.pointClickDestination = null
-    this.playerRespawnAt = null
-    this.touchDirections.clear()
-
     const { width, height } = this.scale
-    this.worldWidth = Math.max(width * 2, 1600)
-    this.groundY = height * 0.72
-    this.drawWorld(height)
-    this.createPlayer(height)
-    this.createBlacksmith()
-    this.observedLevel = this.playerStore.level
-    this.createMonsters()
-    this.setupInput()
-    this.setupAutoBattle()
-
-    this.cameras.main.setBounds(0, 0, this.worldWidth, height)
-    this.cameras.main.startFollow(this.playerBody, true, 0.08, 0.08)
+    this.paused = true
+    this.ended = false
+    this.hearts = 3
+    this.score = 0
+    this.checkpoint = 110
+    this.velocityY = 0
+    this.grounded = false
+    this.facing = 1
+    this.jumpQueued = false
+    this.attackQueued = false
+    this.touchLeft = this.touchRight = this.touchJump = this.touchAttack = false
+    this.coins = []
+    this.foes = []
+    this.cameras.main.setBackgroundColor('#8bd8ee')
+    this.drawBackdrop(width, height)
+    this.buildLevel()
+    this.createHero()
+    this.createCoins()
+    this.createFoes()
+    this.createHud(width)
+    this.keys = this.input.keyboard!.addKeys({
+      left: Phaser.Input.Keyboard.KeyCodes.A,
+      right: Phaser.Input.Keyboard.KeyCodes.D,
+      leftArrow: Phaser.Input.Keyboard.KeyCodes.LEFT,
+      rightArrow: Phaser.Input.Keyboard.KeyCodes.RIGHT,
+      jump: Phaser.Input.Keyboard.KeyCodes.SPACE,
+      up: Phaser.Input.Keyboard.KeyCodes.W,
+      attack: Phaser.Input.Keyboard.KeyCodes.J,
+      pause: Phaser.Input.Keyboard.KeyCodes.ESC
+    }) as typeof this.keys
+    this.input.keyboard!.on('keydown-SPACE', this.queueJump, this)
+    this.input.keyboard!.on('keydown-J', this.queueAttack, this)
+    this.input.keyboard!.on('keydown-P', this.togglePause, this)
+    this.game.events.on('platform:move', this.handleMove, this)
+    this.game.events.on('platform:pause', this.togglePause, this)
+    this.cameras.main.setBounds(0, 0, WIDTH, HEIGHT)
+    this.cameras.main.startFollow(this.player, true, 0.08, 0.12)
+    this.createOverlay(width, height)
     this.events.once(Phaser.Scenes.Events.SHUTDOWN, this.shutdown, this)
     this.events.once(Phaser.Scenes.Events.DESTROY, this.shutdown, this)
-    if (this.playerStore.hp <= 0) this.startPlayerRespawn()
   }
 
   update(_time: number, delta: number) {
-    if (this.shutdownHandled) return
-
-    if (this.playerRespawnAt !== null) {
-      if (this.time.now >= this.playerRespawnAt) this.respawnPlayer()
-    } else {
-      if (this.manualApproachActive) {
-        if (this.hasManualMovementInput()) {
-          this.cancelManualApproach('Đã dừng áp sát · đang điều khiển thủ công')
-          this.updateManualMovement(delta)
-        } else if (this.playerStore.currentTargetId !== this.manualApproachTargetId) {
-          this.cancelManualApproach('Đã dừng áp sát vì mục tiêu đã thay đổi')
-        } else {
-          const result = this.autoBattle.moveTowardSelectedTarget(delta)
-          if (result !== 'moving') this.finishManualApproach(result)
-        }
-      } else {
-        this.updateManualMovement(delta)
+    if (this.paused || this.ended) return
+    const dt = Math.min(delta, 34) / 1000
+    const left = this.keys.left.isDown || this.keys.leftArrow.isDown || this.touchLeft
+    const right = this.keys.right.isDown || this.keys.rightArrow.isDown || this.touchRight
+    const direction = Number(right) - Number(left)
+    if (direction) this.facing = direction
+    this.player.x = Phaser.Math.Clamp(this.player.x + direction * PLAYER_SPEED * dt, 25, WIDTH - 25)
+    this.playerGraphics.setScale(this.facing, 1)
+    if ((this.keys.jump.isDown || this.keys.up.isDown || this.touchJump) && this.grounded) this.jumpQueued = true
+    if (this.jumpQueued && this.grounded) {
+      this.velocityY = -PLAYER_JUMP
+      this.grounded = false
+    }
+    this.jumpQueued = false
+    this.velocityY = Math.min(this.velocityY + 1500 * dt, 850)
+    const oldBottom = this.player.y + 27
+    this.player.y += this.velocityY * dt
+    this.grounded = false
+    for (const platform of this.platforms) {
+      const crosses = oldBottom <= platform.y && this.player.y + 27 >= platform.y
+      const overlaps = this.player.x + 14 > platform.x && this.player.x - 14 < platform.x + platform.width
+      if (this.velocityY >= 0 && crosses && overlaps) {
+        this.player.y = platform.y - 27
+        this.velocityY = 0
+        this.grounded = true
       }
-      this.updateMonsterAttacks()
-      this.autoBattle.update(delta, this.time.now)
-      this.showLevelUpIfNeeded()
     }
-
-    this.updateAutoPotion()
-    this.manaRegenElapsed += Math.min(delta, 1000)
-    if (this.manaRegenElapsed >= 3000) {
-      const regenTicks = Math.floor(this.manaRegenElapsed / 3000)
-      this.manaRegenElapsed %= 3000
-      this.playerStore.regenerateMp(regenTicks * 3)
-    }
-    this.updateMonsterViews()
-    this.playerLabel.setPosition(this.playerBody.x, this.playerBody.y - 42)
-    this.cooldownUiElapsed += delta
-    if (this.cooldownUiElapsed >= 100) {
-      this.cooldownUiElapsed %= 100
-      this.updateCooldownIndicators()
-    }
+    if (this.player.y > HEIGHT + 90) this.takeHit(true)
+    if (this.attackQueued || this.keys.attack.isDown || this.touchAttack) this.attack()
+    this.attackQueued = false
+    this.updateCoins()
+    this.updateFoes(dt)
+    this.updateCheckpoint()
+    if (this.player.x > WIDTH - 100 && this.player.y > 400) this.finish(true)
+    this.hud.setText(`❤ ${'♥'.repeat(this.hearts)}${'♡'.repeat(3 - this.hearts)}     ★ ${this.score}     🪙 ${this.store.gold}     CHẶNG ${this.player.x < 850 ? '1' : this.player.x < 1650 ? '2' : '3'} / 3`)
   }
 
-  private clearTargetStoreState() {
-    this.playerStore.clearTargetState()
-  }
-
-  private updateTargetDistance() {
-    const distance = this.autoBattle.getSelectedTargetDistance()
-    if (distance === null) {
-      this.autoBattle.clearSelectedTarget()
-      this.clearTargetStoreState()
-      return
-    }
-
-    if (this.playerStore.currentTargetId === null) {
-      this.playerStore.currentTargetDistance = null
-      this.playerStore.currentTargetInRange = false
-      return
-    }
-
-    this.playerStore.currentTargetDistance = Math.round(distance)
-    this.playerStore.currentTargetInRange = this.autoBattle.isSelectedTargetInRange()
-  }
-
-  private updateCooldownIndicators() {
-    const attackSeconds = Math.ceil(this.autoBattle.getAttackCooldownRemaining(this.time.now) / 1000)
-    const skillSeconds = Math.ceil(this.autoBattle.getSkillCooldownRemaining(this.time.now) / 1000)
-    this.updateTargetDistance()
-    if (this.playerStore.currentTargetId === null) {
-      this.playerStore.attackCooldownRemaining = 0
-      this.playerStore.skillCooldownRemaining = 0
-      return
-    }
-    if (this.playerStore.attackCooldownRemaining !== attackSeconds) {
-      this.playerStore.attackCooldownRemaining = attackSeconds
-    }
-    if (this.playerStore.skillCooldownRemaining !== skillSeconds) {
-      this.playerStore.skillCooldownRemaining = skillSeconds
-    }
-  }
-
-  private drawWorld(height: number) {
-    this.cameras.main.setBackgroundColor('#14243a')
-
+  private drawBackdrop(width: number, height: number) {
     const sky = this.add.graphics()
-    sky.fillGradientStyle(0x14243a, 0x14243a, 0x263e58, 0x263e58, 1)
-    sky.fillRect(0, 0, this.worldWidth, height)
-    sky.setDepth(-10)
-
-    const scenery = this.add.graphics()
-    scenery.fillStyle(0x203b4b, 1)
-    for (let x = 70; x < this.worldWidth; x += 210) {
-      scenery.fillCircle(x, this.groundY - 94, 40)
-      scenery.fillCircle(x + 35, this.groundY - 69, 28)
+    sky.fillGradientStyle(0x8bd8ee, 0xd7f4d2, 0x8bd8ee, 0xd7f4d2, 1)
+    sky.fillRect(0, 0, WIDTH, HEIGHT)
+    sky.setScrollFactor(0.15)
+    for (let x = 100; x < WIDTH; x += 440) {
+      const hill = this.add.ellipse(x, 510, 570, 190, 0x76bd83).setDepth(-2).setScrollFactor(0.32)
+      const tree = this.add.graphics().setDepth(-1).setScrollFactor(0.45)
+      tree.fillStyle(0x557c55, 1); tree.fillRect(x + 165, 380, 20, 95)
+      tree.fillStyle(0x428d63, 1); tree.fillCircle(x + 175, 375, 48)
+      void hill
     }
-    scenery.fillStyle(0x42604c, 1)
-    scenery.fillRect(0, this.groundY + 10, this.worldWidth, height - this.groundY)
-    scenery.lineStyle(3, 0x8c7954, 1)
-    scenery.lineBetween(0, this.groundY + 10, this.worldWidth, this.groundY + 10)
-    scenery.setDepth(-5)
-
-    this.add.text(28, 112, 'TÂN THỦ THÀNH  ·  BÃI TẬP LUYỆN', {
-      color: '#e5d7b4',
-      fontFamily: 'Arial',
-      fontSize: '16px',
-      fontStyle: 'bold'
-    }).setScrollFactor(0).setDepth(20)
+    this.add.text(30, 20, 'NẤM LÙN TIẾN LÊN', { fontFamily: 'Arial', fontSize: '25px', fontStyle: 'bold', color: '#295b4c', stroke: '#efffc8', strokeThickness: 5 }).setScrollFactor(0).setDepth(20)
+    void width; void height
   }
 
-  private createPlayer(height: number) {
-    this.playerPosition.y = this.groundY - 22
-    this.playerBody = this.add.circle(this.playerPosition.x, this.playerPosition.y, 20, 0x5ca7ff)
-      .setStrokeStyle(3, 0xd7e9ff)
-      .setDepth(5)
-    this.playerLabel = this.add.text(this.playerPosition.x, this.playerPosition.y - 42, 'Chiến Binh', {
-      color: '#ffffff',
-      fontFamily: 'Arial',
-      fontSize: '14px',
-      fontStyle: 'bold',
-      stroke: '#14243a',
-      strokeThickness: 4
-    }).setOrigin(0.5).setDepth(6)
-    this.pointClickMarker = this.add.graphics().setDepth(2)
-
-    this.playerBody.setInteractive({ useHandCursor: true })
-    this.playerBody.on('pointerdown', () => {
-      if (this.shutdownHandled) return
-      this.playerStore.autoMessage = 'Nhân vật của bạn'
-    })
-
-    this.playerPosition.y = Math.min(this.playerPosition.y, height - 60)
-  }
-
-  private createBlacksmith() {
-    const x = 245
-    const y = this.groundY - 26
-    this.blacksmithBody = this.add.rectangle(x, y, 34, 52, 0x9b5637)
-      .setStrokeStyle(3, 0xf0c078)
-      .setDepth(5)
-    this.blacksmithHead = this.add.circle(x, y - 34, 15, 0xe7b27a)
-      .setStrokeStyle(2, 0x4c3027)
-      .setDepth(6)
-    this.add.rectangle(x, y - 43, 35, 9, 0x4c3027).setDepth(7)
-    this.blacksmithLabel = this.add.text(x, y - 69, 'Thợ rèn', {
-      color: '#ffe2a6',
-      fontFamily: 'Arial',
-      fontSize: '13px',
-      fontStyle: 'bold',
-      stroke: '#261b18',
-      strokeThickness: 4
-    }).setOrigin(0.5).setDepth(8)
-    for (const part of [this.blacksmithBody, this.blacksmithHead, this.blacksmithLabel]) {
-      part.setInteractive({ useHandCursor: true })
-      part.on('pointerdown', this.handleBlacksmithClick, this)
-    }
-  }
-
-  private createMonsters() {
-    const definitions = [
-      { id: 'slime-1', name: 'Slime', x: 390, hp: 40, exp: 12, damage: 5, cooldown: 1800, minGold: 2, maxGold: 5, color: 0x79d7a4 },
-      { id: 'slime-2', name: 'Slime', x: 650, hp: 50, exp: 14, damage: 6, cooldown: 1700, minGold: 2, maxGold: 5, color: 0x79d7a4 },
-      { id: 'wolf-1', name: 'Sói non', x: 920, hp: 65, exp: 18, damage: 8, cooldown: 1600, minGold: 5, maxGold: 9, color: 0xd1a16c },
-      { id: 'wolf-2', name: 'Sói non', x: 1200, hp: 70, exp: 20, damage: 9, cooldown: 1500, minGold: 5, maxGold: 9, color: 0xd1a16c },
-      { id: 'goblin-1', name: 'Goblin', x: 1470, hp: 90, exp: 25, damage: 11, cooldown: 1400, minGold: 8, maxGold: 14, color: 0xb9c36c }
+  private buildLevel() {
+    this.platforms = [
+      { x: 0, y: 590, width: 520, height: 110 }, { x: 610, y: 545, width: 230, height: 155 },
+      { x: 920, y: 590, width: 500, height: 110 }, { x: 1500, y: 530, width: 260, height: 170 },
+      { x: 1830, y: 590, width: 420, height: 110 }, { x: 2350, y: 550, width: 250, height: 150 },
+      { x: 320, y: 445, width: 140, height: 24 }, { x: 1010, y: 435, width: 150, height: 24 },
+      { x: 1235, y: 365, width: 120, height: 24 }, { x: 1940, y: 435, width: 135, height: 24 },
+      { x: 2135, y: 370, width: 120, height: 24 }
     ]
+    const g = this.add.graphics()
+    for (const p of this.platforms) {
+      g.fillStyle(0x754b35, 1); g.fillRoundedRect(p.x, p.y, p.width, p.height, 8)
+      g.fillStyle(0x69b84f, 1); g.fillRoundedRect(p.x, p.y, p.width, Math.min(18, p.height), 8)
+      g.fillStyle(0x8f6342, 0.75)
+      for (let x = p.x + 16; x < p.x + p.width - 10; x += 45) g.fillCircle(x, p.y + 43, 3)
+    }
+    const spikes = this.add.graphics()
+    for (const x of [475, 1090, 1330, 1675, 2210]) {
+      const surface = this.platforms.find(platform => x >= platform.x && x < platform.x + platform.width)?.y ?? 590
+      spikes.fillStyle(0xe9f1ce, 1)
+      for (let i = 0; i < 4; i++) spikes.fillTriangle(x + i * 17, surface, x + 8 + i * 17, surface - 25, x + 17 + i * 17, surface)
+    }
+    for (const x of [1000, 1900, 2380]) {
+      this.add.rectangle(x, 500, 5, 96, 0x614532)
+      this.add.circle(x, 497, 8, 0xffdf67)
+      this.add.text(x + 14, 474, '⚑', { fontSize: '26px' })
+    }
+    this.add.rectangle(WIDTH - 80, 497, 8, 105, 0x603c35).setOrigin(0.5, 0)
+    this.add.circle(WIDTH - 80, 494, 11, 0xffdc5c)
+    const sign = this.add.text(WIDTH - 150, 457, 'ĐÍCH', { fontSize: '20px', fontStyle: 'bold', color: '#fff4bf', backgroundColor: '#497b54', padding: { x: 8, y: 5 } }).setOrigin(0.5)
+    this.add.container(0, 0, [sign]).setDepth(4)
+  }
 
-    this.monsters = definitions.map(({ id, name, x, hp, exp, damage, cooldown, minGold, maxGold, color }) => {
-      const data: Monster = {
-        id,
-        name,
-        x,
-        y: this.groundY - 18,
-        hp,
-        maxHp: hp,
-        expValue: exp,
-        isAlive: true
+  private createHero() {
+    this.playerGraphics = this.add.graphics()
+    this.playerGraphics.fillStyle(0xf1c893, 1); this.playerGraphics.fillCircle(0, 7, 11)
+    this.playerGraphics.fillStyle(0xe74c3c, 1); this.playerGraphics.fillEllipse(0, -7, 34, 20)
+    this.playerGraphics.fillStyle(0xb82f35, 1); this.playerGraphics.fillEllipse(0, -16, 45, 13)
+    this.playerGraphics.fillStyle(0x352d40, 1); this.playerGraphics.fillCircle(4, 5, 2)
+    this.playerGraphics.fillStyle(0x4e7cda, 1); this.playerGraphics.fillRoundedRect(-10, 14, 20, 15, 4)
+    this.playerGraphics.fillStyle(0x463b37, 1); this.playerGraphics.fillRoundedRect(-13, 25, 11, 5, 2); this.playerGraphics.fillRoundedRect(3, 25, 11, 5, 2)
+    this.player = this.add.container(110, 563, [this.playerGraphics]).setDepth(5)
+    this.add.text(110, 522, 'Nấm Lùn', { fontSize: '13px', fontStyle: 'bold', color: '#fff', stroke: '#326144', strokeThickness: 4 }).setOrigin(0.5).setDepth(6)
+  }
+
+  private createCoins() {
+    for (const [x, y] of [[250, 515], [350, 400], [420, 400], [685, 470], [755, 470], [1000, 540], [1080, 390], [1275, 320], [1555, 480], [1625, 480], [1975, 390], [2165, 325], [2440, 500]] as number[][]) {
+      const body = this.add.circle(x, y, 10, 0xffdf64).setStrokeStyle(3, 0xf8a92e).setDepth(3)
+      const shine = this.add.circle(x, y, 4, 0xfff7b8).setDepth(4)
+      this.coins.push({ body, shine, taken: false })
+    }
+  }
+
+  private createFoes() {
+    for (const x of [720, 1100, 1580, 2020, 2410]) {
+      const platform = this.platforms.find(item => x >= item.x && x < item.x + item.width)!
+      const body = this.add.container(x, platform.y - 18).setDepth(4)
+      body.add(this.add.circle(0, 0, 18, 0x9b72c7).setStrokeStyle(3, 0xe5d7ff))
+      body.add(this.add.circle(-6, -4, 3, 0xffffff)); body.add(this.add.circle(6, -4, 3, 0xffffff))
+      this.foes.push({ body, min: Math.max(platform.x + 30, x - 60), max: Math.min(platform.x + platform.width - 30, x + 60), direction: 1, alive: true })
+    }
+  }
+
+  private createHud(width: number) {
+    this.hud = this.add.text(0, 20, '', { fontFamily: 'Arial', fontSize: '19px', fontStyle: 'bold', color: '#fff', stroke: '#315641', strokeThickness: 5 }).setScrollFactor(0).setDepth(30)
+    this.hud.setPosition(width - 24, 22).setOrigin(1, 0)
+    const hint = this.add.text(22, 61, 'A/D hoặc ←/→ di chuyển  ·  SPACE/W nhảy  ·  J đánh  ·  P tạm dừng', { fontSize: '14px', color: '#fff', stroke: '#315641', strokeThickness: 4 }).setScrollFactor(0).setDepth(30)
+    void hint
+  }
+
+  private createOverlay(width: number, height: number) {
+    const shade = this.add.rectangle(width / 2, height / 2, width, height, 0x18354a, 0.7)
+    const card = this.add.rectangle(width / 2, height / 2, 510, 275, 0xfff1d2, 0.98).setStrokeStyle(5, 0x81553c)
+    const title = this.add.text(width / 2, height / 2 - 83, 'NẤM LÙN TIẾN LÊN', { fontSize: '38px', fontStyle: 'bold', color: '#408a53', stroke: '#fff', strokeThickness: 4 }).setOrigin(0.5)
+    this.overlayText = this.add.text(width / 2, height / 2 - 17, 'Chạy qua ba chặng, gom xu và đánh bại quái vật.\nCẩn thận hố sâu và gai nhọn!', { fontSize: '17px', color: '#54453c', align: 'center', lineSpacing: 8 }).setOrigin(0.5)
+    const button = this.add.rectangle(width / 2, height / 2 + 83, 210, 53, 0x60ae55).setStrokeStyle(3, 0x387043).setInteractive({ useHandCursor: true })
+    this.overlayButtonLabel = this.add.text(width / 2, height / 2 + 83, 'BẮT ĐẦU  ▶', { fontSize: '21px', fontStyle: 'bold', color: '#fff' }).setOrigin(0.5)
+    this.overlay = this.add.container(0, 0, [shade, card, title, this.overlayText, button, this.overlayButtonLabel]).setScrollFactor(0).setDepth(100)
+    button.on('pointerdown', () => this.handleOverlayAction())
+    this.overlayText.setText('Chạy qua ba chặng, gom xu và đánh bại quái vật.\nCẩn thận hố sâu và gai nhọn!')
+    this.scale.on(Phaser.Scale.Events.RESIZE, this.layoutOverlay, this)
+  }
+
+  private layoutOverlay = () => {
+    if (!this.overlay?.active) return
+    const width = this.scale.width; const height = this.scale.height
+    for (const item of this.overlay.list) {
+      if ('setPosition' in item && item instanceof Phaser.GameObjects.Rectangle) item.setPosition(width / 2, height / 2)
+      else if ('setPosition' in item && item instanceof Phaser.GameObjects.Text) item.setPosition(width / 2, height / 2)
+    }
+    const [shade, card, title, text, button, label] = this.overlay.list as Phaser.GameObjects.GameObject[]
+    ;(shade as Phaser.GameObjects.Rectangle).setSize(width, height)
+    ;(card as Phaser.GameObjects.Rectangle).setSize(Math.min(510, width - 32), 275)
+    ;(title as Phaser.GameObjects.Text).setY(height / 2 - 83)
+    ;(text as Phaser.GameObjects.Text).setY(height / 2 - 17)
+    ;(button as Phaser.GameObjects.Rectangle).setPosition(width / 2, height / 2 + 83)
+    ;(label as Phaser.GameObjects.Text).setPosition(width / 2, height / 2 + 83)
+  }
+
+  private handleOverlayAction() {
+    if (this.ended) { this.scene.restart(); return }
+    this.paused = !this.paused
+    this.overlay.setVisible(this.paused)
+  }
+
+  private togglePause = () => {
+    if (this.ended) return
+    this.paused = !this.paused
+    this.overlay.setVisible(this.paused)
+    this.overlayText.setText(this.paused ? 'Nghỉ một chút nhé!\nNhấn nút hoặc P để tiếp tục.' : '')
+    this.overlayButtonLabel.setText(this.paused ? 'TIẾP TỤC  ▶' : 'BẮT ĐẦU  ▶')
+  }
+
+  private queueJump = () => { this.jumpQueued = true }
+  private queueAttack = () => { this.attackQueued = true }
+  private handleMove = (payload: { action: 'left' | 'right' | 'jump' | 'attack'; pressed: boolean }) => this.touchEvents[payload.action]?.(payload.pressed)
+
+  private attack() {
+    for (const foe of this.foes) {
+      const targetDistance = foe.body.x - this.player.x
+      if (!foe.alive || Math.abs(targetDistance) > 52 || Math.abs(foe.body.y - this.player.y) > 48 || targetDistance * this.facing < -8) continue
+      if (this.velocityY > 60 && this.player.y < foe.body.y) this.velocityY = -330
+      foe.alive = false
+      this.tweens.add({ targets: foe.body, alpha: 0, scale: 1.7, duration: 180, onComplete: () => foe.body.destroy() })
+      this.score += 100
+      this.store.gainExp(12)
+      this.store.gold += rollGoldReward(2, 6)
+      this.store.recordMonsterDefeat()
+      this.store.autoMessage = 'Quái vật đã bị đánh bại!'
+    }
+  }
+
+  private updateCoins() {
+    for (const coin of this.coins) {
+      if (coin.taken || Phaser.Math.Distance.Between(this.player.x, this.player.y, coin.body.x, coin.body.y) > 32) continue
+      coin.taken = true
+      coin.body.destroy()
+      coin.shine.destroy()
+      this.score += 25
+      this.store.gold += 1
+      this.store.autoMessage = 'Nhặt được một đồng xu!'
+    }
+  }
+
+  private updateFoes(dt: number) {
+    for (const foe of this.foes) {
+      if (!foe.alive) continue
+      foe.body.x += foe.direction * 65 * dt
+      if (foe.body.x < foe.min || foe.body.x > foe.max) foe.direction *= -1
+      if (Phaser.Math.Distance.Between(this.player.x, this.player.y, foe.body.x, foe.body.y) < 34) {
+        if (this.velocityY > 100 && this.player.y < foe.body.y - 8) {
+          foe.alive = false; foe.body.destroy(); this.velocityY = -370
+          this.score += 100; this.store.gainExp(12); this.store.recordMonsterDefeat()
+        } else this.takeHit()
       }
-      const body = this.add.circle(x, data.y, 17, color).setStrokeStyle(2, 0xf3e7c7).setDepth(4)
-      const label = this.add.text(x, data.y - 34, name, {
-        color: '#f5ebd2',
-        fontFamily: 'Arial',
-        fontSize: '13px',
-        stroke: '#182331',
-        strokeThickness: 3
-      }).setOrigin(0.5).setDepth(6)
-      const healthBar = this.add.graphics().setDepth(6)
-      const selectionMarker = this.add.graphics().setDepth(3)
-
-      body.setInteractive({ useHandCursor: true })
-      body.on('pointerdown', () => {
-        if (this.shutdownHandled || this.playerRespawnAt !== null || this.playerStore.hp <= 0) return
-        this.autoBattle?.selectTarget(id)
-        this.updateTargetDistance()
-      })
-
-      return {
-        data,
-        body,
-        label,
-        healthBar,
-        selectionMarker,
-        color,
-        attackDamage: damage,
-        attackCooldown: cooldown,
-        nextAttackAt: 0,
-        minGold,
-        maxGold,
-        respawnAt: null
-      }
-    })
-  }
-
-  private setupInput() {
-    this.keys = this.input.keyboard!.addKeys({
-      up: Phaser.Input.Keyboard.KeyCodes.W,
-      down: Phaser.Input.Keyboard.KeyCodes.S,
-      left: Phaser.Input.Keyboard.KeyCodes.A,
-      right: Phaser.Input.Keyboard.KeyCodes.D,
-      arrowUp: Phaser.Input.Keyboard.KeyCodes.UP,
-      arrowDown: Phaser.Input.Keyboard.KeyCodes.DOWN,
-      arrowLeft: Phaser.Input.Keyboard.KeyCodes.LEFT,
-      arrowRight: Phaser.Input.Keyboard.KeyCodes.RIGHT
-    }) as Record<
-      'up' | 'down' | 'left' | 'right' | 'arrowUp' | 'arrowDown' | 'arrowLeft' | 'arrowRight',
-      Phaser.Input.Keyboard.Key
-    >
-    this.input.on('pointerdown', this.handlePointClick, this)
-  }
-
-  private setupAutoBattle() {
-    this.autoBattle = new AutoBattleSystem(this.playerPosition, {
-      onStatus: (state: AutoState, target, message) => {
-        this.playerStore.autoState = state
-        if (!target) {
-          this.clearTargetStoreState()
-        } else {
-          this.playerStore.currentTarget = target.name
-          this.playerStore.currentTargetId = target.id
-          this.playerStore.currentTargetHp = target.hp
-          this.playerStore.currentTargetMaxHp = target.maxHp
-        }
-        this.updateTargetDistance()
-        this.playerStore.autoMessage = message
-      },
-      onMove: (x, y) => this.playerBody.setPosition(x, y),
-      canAct: () => this.playerRespawnAt === null && this.playerStore.hp > 0,
-      onUseSkill: mpCost => {
-        if (this.playerStore.mp < mpCost) return false
-        this.playerStore.mp -= mpCost
-        return true
-      },
-      getAttackPower: () => this.playerStore.attackPower,
-      onDamage: (monster, damage, critical) => {
-        if (this.playerStore.currentTargetId === monster.id) {
-          this.playerStore.currentTargetHp = monster.hp
-        }
-        const view = this.monsters.find(item => item.data.id === monster.id)
-        if (view) {
-          view.body.setFillStyle(0xffffff)
-          this.tweens.add({
-            targets: view.body,
-            scaleX: 1.3,
-            scaleY: 1.3,
-            duration: 90,
-            yoyo: true,
-            onComplete: () => view.body.setFillStyle(view.color)
-          })
-        }
-        const damageText = this.add.text(
-          monster.x,
-          monster.y - (critical ? 62 : 52),
-          critical ? `BẠO KÍCH -${damage}` : `-${damage}`,
-          {
-          color: critical ? '#ff8b45' : '#ffe28a',
-          fontFamily: 'Arial',
-          fontSize: critical ? '18px' : '16px',
-          fontStyle: 'bold',
-          stroke: '#261b18',
-          strokeThickness: 3
-        }).setOrigin(0.5).setDepth(10)
-        this.tweens.add({
-          targets: damageText,
-          y: damageText.y - 24,
-          alpha: 0,
-          duration: 600,
-          onComplete: () => damageText.destroy()
-        })
-      },
-      onDefeat: monster => this.onMonsterDefeated(monster),
-      onWarning: message => {
-        this.playerStore.autoMessage = message
-      }
-    })
-    this.autoBattle.setMonsters(this.monsters.map(monster => monster.data))
-    this.game.events.on('game:shutdown', this.shutdown, this)
-    this.game.events.on('auto:toggle', this.handleAutoToggle, this)
-    this.game.events.on('manual:attack', this.handleManualAttack, this)
-    this.game.events.on('manual:skill', this.handleManualSkill, this)
-    this.game.events.on('target:next', this.handleNextTarget, this)
-    this.game.events.on('target:previous', this.handlePreviousTarget, this)
-    this.game.events.on('target:approach', this.handleApproachTarget, this)
-    this.game.events.on('target:approach:cancel', this.handleCancelApproach, this)
-    this.game.events.on('move:touch', this.handleTouchMovement, this)
-    this.input.keyboard?.on('keydown-Q', this.handleManualSkill, this)
-    this.input.keyboard?.on('keydown-E', this.handleHealingPotion, this)
-
-    if (this.playerStore.autoBattle) {
-      this.autoBattle.toggleAuto(true)
+    }
+    for (const x of this.spikePositions) {
+      const platform = this.platforms.find(item => x >= item.x && x <= item.x + item.width)
+      if (!platform) continue
+      const onGroundAtSpikes = Math.abs(this.player.x - x - 34) < 37 &&
+        this.player.y + 26 > platform.y - 32 && this.player.y + 26 < platform.y + 12
+      if (onGroundAtSpikes) this.takeHit()
     }
   }
 
-  private getManualMovementDirection() {
-    const horizontal =
-      Number(this.keys.right.isDown || this.keys.arrowRight.isDown || this.touchDirections.has('right')) -
-      Number(this.keys.left.isDown || this.keys.arrowLeft.isDown || this.touchDirections.has('left'))
-    const vertical =
-      Number(this.keys.down.isDown || this.keys.arrowDown.isDown || this.touchDirections.has('down')) -
-      Number(this.keys.up.isDown || this.keys.arrowUp.isDown || this.touchDirections.has('up'))
-    return { horizontal, vertical }
+  private updateCheckpoint() {
+    for (const x of [1000, 1900, 2380]) if (this.player.x > x) this.checkpoint = x
   }
 
-  private hasManualMovementInput() {
-    const { horizontal, vertical } = this.getManualMovementDirection()
-    return horizontal !== 0 || vertical !== 0
+  private takeHit(fall = false) {
+    if (this.time.now < (this.registry.get('invulnerableUntil') ?? 0)) return
+    this.registry.set('invulnerableUntil', this.time.now + 1200)
+    this.hearts -= 1
+    this.velocityY = fall ? 0 : -260
+    this.player.x = this.checkpoint
+    this.player.y = 450
+    this.store.autoMessage = `Bị thương! Còn ${this.hearts} tim.`
+    this.cameras.main.shake(160, 0.008)
+    if (this.hearts <= 0) this.finish(false)
   }
 
-  private updateManualMovement(delta: number) {
-    if (this.playerStore.autoBattle || this.playerRespawnAt !== null) return
-
-    const { horizontal, vertical } = this.getManualMovementDirection()
-    if (horizontal === 0 && vertical === 0) {
-      if (this.pointClickDestination === null) return
-
-      const distance = this.pointClickDestination - this.playerPosition.x
-      const step = 220 * Math.min(delta, 1000) / 1000
-      if (Math.abs(distance) <= step) {
-        this.playerPosition.x = this.pointClickDestination
-        this.pointClickDestination = null
-        this.pointClickMarker.clear()
-      } else {
-        this.playerPosition.x += Math.sign(distance) * step
-      }
-      this.playerBody.setPosition(this.playerPosition.x, this.playerPosition.y)
-      return
-    }
-
-    this.pointClickDestination = null
-    this.pointClickMarker.clear()
-
-    const length = Math.hypot(horizontal, vertical)
-    const distance = 220 * Math.min(delta, 1000) / 1000 / length
-    this.playerPosition.x = Phaser.Math.Clamp(this.playerPosition.x + horizontal * distance, 30, this.worldWidth - 30)
-    this.playerPosition.y = Phaser.Math.Clamp(this.playerPosition.y + vertical * distance, 70, this.scale.height - 55)
-    this.playerBody.setPosition(this.playerPosition.x, this.playerPosition.y)
-  }
-
-  private handlePointClick(pointer: Phaser.Input.Pointer) {
-    if (
-      this.shutdownHandled ||
-      this.playerStore.autoBattle ||
-      this.playerRespawnAt !== null ||
-      this.playerStore.hp <= 0
-    ) return
-
-    const hitObjects = this.input.hitTestPointer(pointer)
-    if (
-      hitObjects.includes(this.playerBody) ||
-      hitObjects.includes(this.blacksmithBody) ||
-      hitObjects.includes(this.blacksmithHead) ||
-      hitObjects.includes(this.blacksmithLabel) ||
-      this.monsters.some(monster => hitObjects.includes(monster.body))
-    ) return
-
-    if (pointer.worldY < this.groundY - 55 || pointer.worldY > this.scale.height) return
-
-    this.pointClickDestination = Phaser.Math.Clamp(pointer.worldX, 30, this.worldWidth - 30)
-    this.drawPointClickMarker()
-    this.playerStore.autoMessage = 'Đang di chuyển đến điểm đã chọn'
-  }
-
-  private drawPointClickMarker() {
-    this.pointClickMarker.clear()
-    if (this.pointClickDestination === null) return
-    this.pointClickMarker.lineStyle(2, 0xffdf82, 0.9)
-    this.pointClickMarker.strokeCircle(this.pointClickDestination, this.groundY - 18, 12)
-    this.pointClickMarker.lineBetween(
-      this.pointClickDestination,
-      this.groundY - 6,
-      this.pointClickDestination,
-      this.groundY + 9
-    )
-  }
-
-  private handleBlacksmithClick() {
-    if (this.shutdownHandled || this.playerRespawnAt !== null || this.playerStore.hp <= 0) return
-    this.pointClickDestination = null
-    this.pointClickMarker.clear()
-    this.playerStore.openForgePanel()
-  }
-
-  private handleTouchMovement(direction: TouchDirection, pressed: boolean) {
-    if (pressed) {
-      this.pointClickDestination = null
-      this.pointClickMarker.clear()
-      this.touchDirections.add(direction)
-    } else {
-      this.touchDirections.delete(direction)
-    }
-  }
-
-  private showLevelUpIfNeeded() {
-    if (this.playerStore.level <= this.observedLevel) return
-
-    this.observedLevel = this.playerStore.level
-    const levelText = this.add.text(
-      this.playerPosition.x,
-      this.playerPosition.y - 78,
-      `THĂNG CẤP ${this.playerStore.level}!`,
-      {
-        color: '#ffe28a',
-        fontFamily: 'Arial',
-        fontSize: '22px',
-        fontStyle: 'bold',
-        stroke: '#392b18',
-        strokeThickness: 5
-      }
-    ).setOrigin(0.5).setDepth(15)
-
-    this.playerBody.setStrokeStyle(5, 0xffdf82)
-    this.tweens.add({
-      targets: [levelText, this.playerBody],
-      y: '-=42',
-      alpha: { from: 1, to: 0 },
-      duration: 1100,
-      ease: 'Cubic.easeOut',
-      onComplete: () => {
-        levelText.destroy()
-        this.playerBody.setStrokeStyle(3, 0xd7e9ff)
-      }
-    })
-  }
-
-  private updateMonsterViews() {
-    for (const monster of this.monsters) {
-      if (!monster.data.isAlive) {
-        monster.selectionMarker.setVisible(false)
-        if (monster.respawnAt !== null && this.time.now >= monster.respawnAt) {
-          monster.data.isAlive = true
-          monster.data.hp = monster.data.maxHp
-          monster.respawnAt = null
-        } else {
-          continue
-        }
-      }
-
-      monster.body.setVisible(true)
-      monster.label.setVisible(true)
-      const isSelected = monster.data.id === this.playerStore.currentTargetId
-      monster.selectionMarker.clear()
-      monster.selectionMarker.setVisible(isSelected)
-      if (isSelected) {
-        const color = this.autoBattle.isSelectedTargetInRange() ? 0x83dc8e : 0xffc45c
-        monster.selectionMarker.lineStyle(3, color, 0.95)
-        monster.selectionMarker.strokeCircle(monster.data.x, monster.data.y, 25)
-      }
-      monster.healthBar.clear()
-      monster.healthBar.fillStyle(0x412c34, 1)
-      monster.healthBar.fillRect(monster.data.x - 20, monster.data.y - 29, 40, 5)
-      monster.healthBar.fillStyle(0x83dc8e, 1)
-      monster.healthBar.fillRect(
-        monster.data.x - 20,
-        monster.data.y - 29,
-        40 * (monster.data.hp / monster.data.maxHp),
-        5
-      )
-    }
-  }
-
-  private updateMonsterAttacks() {
-    for (const monster of this.monsters) {
-      if (
-        !monster.data.isAlive ||
-        this.time.now < monster.nextAttackAt ||
-        Phaser.Math.Distance.Between(
-          this.playerPosition.x,
-          this.playerPosition.y,
-          monster.data.x,
-          monster.data.y
-        ) > MONSTER_ATTACK_RANGE
-      ) continue
-
-      monster.nextAttackAt = this.time.now + monster.attackCooldown
-      const actualDamage = this.playerStore.takeDamage(monster.attackDamage)
-      this.showDamageText(this.playerPosition.x, this.playerPosition.y - 42, `-${actualDamage}`, 0xff807b)
-      this.playerBody.setFillStyle(0xff807b)
-      this.tweens.add({
-        targets: this.playerBody,
-        scaleX: 1.16,
-        scaleY: 1.16,
-        duration: 110,
-        yoyo: true,
-        onComplete: () => this.playerBody.setFillStyle(0x5ca7ff)
-      })
-
-      if (this.playerStore.hp <= 0) {
-        this.startPlayerRespawn()
-        break
-      }
-
-    }
-  }
-
-  private updateAutoPotion() {
-    if (
-      this.playerRespawnAt === null &&
-      this.playerStore.autoBattle &&
-      this.time.now >= this.nextAutoPotionAt &&
-      this.playerStore.useHealingPotionIfHpAtOrBelow(this.playerStore.autoPotionThreshold)
-    ) {
-      this.nextAutoPotionAt = this.time.now + AUTO_POTION_COOLDOWN
-    }
-  }
-
-  private startPlayerRespawn() {
-    if (this.playerRespawnAt !== null || this.playerStore.hp > 0) return
-
-    this.playerRespawnAt = this.time.now + PLAYER_RESPAWN_DELAY
-    this.pointClickDestination = null
-    this.pointClickMarker.clear()
-    this.manualApproachActive = false
-    this.manualApproachTargetId = null
-    this.autoBattle.toggleAuto(false)
-    this.playerStore.setAutoBattle(false)
-    this.clearTargetStoreState()
-    this.touchDirections.clear()
-    this.playerBody.setAlpha(0.35)
-    this.playerStore.autoMessage = 'Bạn đã gục ngã · sẽ hồi sinh sau 3 giây'
-  }
-
-  private respawnPlayer() {
-    this.playerRespawnAt = null
-    this.manualApproachActive = false
-    this.manualApproachTargetId = null
-    this.playerPosition.x = 120
-    this.playerPosition.y = this.groundY - 22
-    this.playerBody.setPosition(this.playerPosition.x, this.playerPosition.y).setAlpha(1)
-    this.playerStore.restoreHealth(Math.ceil(this.playerStore.maxHp / 2))
-    this.clearTargetStoreState()
-    this.autoBattle.toggleAuto(false)
-    this.playerStore.setAutoBattle(false)
-    for (const monster of this.monsters) {
-      monster.nextAttackAt = this.time.now + monster.attackCooldown
-    }
-    this.playerStore.autoMessage = 'Đã hồi sinh tại điểm xuất phát · HP được hồi một nửa'
-  }
-
-  private showDamageText(x: number, y: number, text: string, color: number) {
-    const damageText = this.add.text(x, y, text, {
-      color: `#${color.toString(16).padStart(6, '0')}`,
-      fontFamily: 'Arial',
-      fontSize: '16px',
-      fontStyle: 'bold',
-      stroke: '#261b18',
-      strokeThickness: 3
-    }).setOrigin(0.5).setDepth(10)
-    this.tweens.add({
-      targets: damageText,
-      y: damageText.y - 24,
-      alpha: 0,
-      duration: 600,
-      onComplete: () => damageText.destroy()
-    })
-  }
-
-  private onMonsterDefeated(monster: Monster) {
-    const view = this.monsters.find(item => item.data.id === monster.id)
-    if (view) {
-      view.body.setVisible(false)
-      view.label.setVisible(false)
-      view.healthBar.clear()
-      view.selectionMarker.setVisible(false)
-      view.respawnAt = this.time.now + 6000
-    }
-
-    if (this.playerStore.currentTargetId === monster.id) {
-      this.clearTargetStoreState()
-    }
-
-    this.playerStore.gainExp(monster.expValue)
-    const goldReward = view ? rollGoldReward(view.minGold, view.maxGold) : 0
-    this.playerStore.gold += goldReward
-    this.showDamageText(monster.x, monster.y - 72, `+${goldReward} vàng`, 0xf0d48e)
-    this.playerStore.recordMonsterDefeat()
-    this.rollLoot(monster)
-  }
-
-  private rollLoot(monster: Monster) {
-    const roll = Math.random()
-    const loot = roll < 0.08
-      ? this.playerStore.createItem({
-          name: 'Giáp da tập sự',
-          type: 'equipment',
-          rarity: 'Tốt',
-          quantity: 1,
-          slot: 'armor',
-          defenseBonus: 2
-        })
-      : roll < 0.23
-        ? this.playerStore.createItem({
-          name: 'Kiếm tập sự',
-          type: 'equipment',
-          rarity: 'Tốt',
-          quantity: 1,
-          slot: 'weapon',
-          attackBonus: 4
-        })
-        : roll < 0.38
-          ? this.playerStore.createItem({
-            name: 'Thuốc hồi phục',
-            type: 'consumable',
-            rarity: 'Thường',
-            quantity: 1,
-            healAmount: 50
-          })
-          : this.playerStore.createItem({
-            name: 'Mảnh linh thạch',
-            type: 'material',
-            rarity: 'Thường',
-            quantity: 1
-          })
-
-    if (this.playerStore.addItem(loot)) {
-      this.playerStore.autoMessage = `${monster.name} rơi ${loot.name}`
-    } else {
-      this.playerStore.autoMessage = 'Túi đồ đã đầy; không thể nhặt vật phẩm'
-    }
-  }
-
-  private handleAutoToggle(enabled: boolean) {
-    this.cancelManualApproach()
-    this.pointClickDestination = null
-    this.pointClickMarker.clear()
-    if (enabled && (this.playerRespawnAt !== null || this.playerStore.hp <= 0)) {
-      this.autoBattle.toggleAuto(false)
-      this.playerStore.setAutoBattle(false)
-      this.playerStore.autoMessage = 'Bạn đã gục ngã · sẽ hồi sinh sau 3 giây'
-      return
-    }
-
-    if (!enabled) {
-      this.clearTargetStoreState()
-      this.autoBattle.toggleAuto(false)
-      return
-    }
-
-    this.touchDirections.clear()
-    this.autoBattle.toggleAuto(true)
-  }
-
-  private handleManualAttack() {
-    this.cancelManualApproach('Đã dừng áp sát')
-    this.autoBattle.attackSelected(this.time.now)
-  }
-
-  private handleManualSkill() {
-    this.cancelManualApproach('Đã dừng áp sát')
-    this.autoBattle.castSkillSelected(this.time.now)
-  }
-
-  private handleApproachTarget() {
-    if (this.playerRespawnAt !== null || this.playerStore.hp <= 0) return
-    if (this.playerStore.autoBattle) return
-    if (!this.playerStore.currentTargetId || this.playerStore.currentTargetInRange) {
-      this.playerStore.autoMessage = this.playerStore.currentTargetId
-        ? 'Mục tiêu đã trong tầm đánh'
-        : 'Hãy chọn mục tiêu trước'
-      return
-    }
-
-    this.pointClickDestination = null
-    this.pointClickMarker.clear()
-    this.manualApproachActive = true
-    this.manualApproachTargetId = this.playerStore.currentTargetId
-    this.playerStore.autoState = 'MOVE_TO_TARGET'
-    this.playerStore.autoMessage = `Đang áp sát ${this.playerStore.currentTarget}`
-  }
-
-  private finishManualApproach(result: ApproachResult) {
-    const message = result === 'arrived'
-      ? 'Đã vào tầm đánh · hãy chọn đòn đánh hoặc kỹ năng'
-      : 'Đã dừng áp sát vì mục tiêu không còn khả dụng'
-    this.cancelManualApproach(message)
-  }
-
-  private cancelManualApproach(message?: string) {
-    if (!this.manualApproachActive) return
-    this.manualApproachActive = false
-    this.manualApproachTargetId = null
-    this.playerStore.autoState = 'IDLE'
-    if (message) this.playerStore.autoMessage = message
-  }
-
-  private handleCancelApproach() {
-    this.cancelManualApproach('Đã dừng áp sát')
-  }
-
-  private handleNextTarget() {
-    if (this.playerRespawnAt !== null || this.playerStore.hp <= 0) return
-    this.autoBattle.selectAdjacentTarget('next')
-  }
-
-  private handlePreviousTarget() {
-    if (this.playerRespawnAt !== null || this.playerStore.hp <= 0) return
-    this.autoBattle.selectAdjacentTarget('previous')
-  }
-
-  private handleHealingPotion() {
-    if (this.playerStore.useHealingPotion()) return
-    this.playerStore.autoMessage = 'Không có thuốc hồi phục hoặc HP đã đầy'
+  private finish(won: boolean) {
+    this.ended = true
+    this.paused = true
+    this.overlayText.setText(won
+      ? `Bạn đã chinh phục cả ba chặng!\nĐiểm số: ${this.score}  ·  Vàng: ${this.store.gold}`
+      : `Hết tim mất rồi!\nĐiểm số: ${this.score}  ·  Hãy thử lại nhé.`)
+    this.overlayButtonLabel.setText('CHƠI LẠI  ↻')
+    this.overlay.setVisible(true)
   }
 
   private shutdown() {
-    if (this.shutdownHandled) return
-    this.shutdownHandled = true
-
-    this.tweens.killAll()
-    this.events.off(Phaser.Scenes.Events.SHUTDOWN, this.shutdown, this)
-    this.events.off(Phaser.Scenes.Events.DESTROY, this.shutdown, this)
-    this.game.events.off('game:shutdown', this.shutdown, this)
-    this.game.events.off('auto:toggle', this.handleAutoToggle, this)
-    this.game.events.off('manual:attack', this.handleManualAttack, this)
-    this.game.events.off('manual:skill', this.handleManualSkill, this)
-    this.game.events.off('target:next', this.handleNextTarget, this)
-    this.game.events.off('target:previous', this.handlePreviousTarget, this)
-    this.game.events.off('target:approach', this.handleApproachTarget, this)
-    this.game.events.off('target:approach:cancel', this.handleCancelApproach, this)
-    this.game.events.off('move:touch', this.handleTouchMovement, this)
-    this.input.off('pointerdown', this.handlePointClick, this)
-    this.playerBody.off('pointerdown')
-    this.blacksmithBody.off('pointerdown', this.handleBlacksmithClick, this)
-    this.blacksmithHead.off('pointerdown', this.handleBlacksmithClick, this)
-    this.blacksmithLabel.off('pointerdown', this.handleBlacksmithClick, this)
-    for (const monster of this.monsters) {
-      monster.body.off('pointerdown')
-    }
-    this.touchDirections.clear()
-    this.input.keyboard?.off('keydown-Q', this.handleManualSkill, this)
-    this.input.keyboard?.off('keydown-E', this.handleHealingPotion, this)
-    this.autoBattle?.dispose()
-    this.manualApproachActive = false
-    this.manualApproachTargetId = null
-    this.pointClickDestination = null
-    this.pointClickMarker.clear()
-    this.playerRespawnAt = null
-    this.playerStore.closeForgePanel()
-    this.playerStore.autoState = 'IDLE'
-    this.clearTargetStoreState()
-    this.monsters = []
+    this.game.events.off('platform:move', this.handleMove, this)
+    this.game.events.off('platform:pause', this.togglePause, this)
+    this.input.keyboard?.off('keydown-SPACE', this.queueJump, this)
+    this.input.keyboard?.off('keydown-J', this.queueAttack, this)
+    this.input.keyboard?.off('keydown-P', this.togglePause, this)
+    this.scale.off(Phaser.Scale.Events.RESIZE, this.layoutOverlay, this)
   }
 }

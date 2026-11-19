@@ -6,7 +6,7 @@ const routes = [
     path: '/',
     name: 'Game',
     component: () => import('../views/GameView.vue'),
-    meta: { title: 'Chiênio Game - Auto Battle MVP', requiresAuth: true }
+    meta: { title: 'Chiênio Game - Auto Battle MVP' }
   },
   {
     path: '/settings',
