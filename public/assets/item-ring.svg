@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="160" height="160" viewBox="0 0 160 160">
+  <defs>
+    <radialGradient id="gem"><stop stop-color="#fff"/><stop offset=".25" stop-color="#95e3f2"/><stop offset="1" stop-color="#3d82c4"/></radialGradient>
+  </defs>
+  <ellipse cx="80" cy="138" rx="48" ry="10" fill="#315a35" opacity=".22"/>
+  <ellipse cx="80" cy="98" rx="51" ry="42" fill="none" stroke="#d5a84b" stroke-width="18"/>
+  <path d="M80 18l35 35-35 36-35-36Z" fill="url(#gem)" stroke="#4e79a4" stroke-width="7"/>
+  <path d="M80 18v71M45 53h70" stroke="#dcf7ff" stroke-width="6" opacity=".8"/>
+  <circle cx="80" cy="61" r="10" fill="#fff" opacity=".72"/>
+</svg>

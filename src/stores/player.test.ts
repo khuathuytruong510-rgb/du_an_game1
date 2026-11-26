@@ -34,6 +34,52 @@ const installLocalStorage = () => {
   }
 }
 
+test('validates and persists character name and avatar', () => {
+  setActivePinia(createPinia())
+  const player = usePlayerStore()
+  const restoreLocalStorage = installLocalStorage()
+
+  try {
+    assert.equal(player.setPlayerProfile('A', 'hero-scout'), false)
+    assert.equal(player.playerName, 'Nấm Lùn')
+
+    assert.equal(player.setPlayerProfile('Chiến Binh Test', 'hero-scout'), true)
+    assert.equal(player.playerName, 'Chiến Binh Test')
+    assert.equal(player.playerAvatar, 'hero-scout')
+    assert.equal(player.getSaveData().playerName, 'Chiến Binh Test')
+  } finally {
+    restoreLocalStorage()
+  }
+})
+
+test('persists and restores the selected mount on the device', () => {
+  setActivePinia(createPinia())
+  const originalWindow = Object.getOwnPropertyDescriptor(globalThis, 'window')
+  const restoreLocalStorage = installLocalStorage()
+  Object.defineProperty(globalThis, 'window', {
+    configurable: true,
+    value: { localStorage: globalThis.localStorage }
+  })
+
+  try {
+    const player = usePlayerStore()
+    assert.equal(player.setMount('ice-dragon'), true)
+    assert.equal(player.mountId, 'ice-dragon')
+
+    setActivePinia(createPinia())
+    const restoredPlayer = usePlayerStore()
+    restoredPlayer.initializeGame()
+    assert.equal(restoredPlayer.mountId, 'ice-dragon')
+
+    assert.equal(restoredPlayer.setMount(null), true)
+    assert.equal(restoredPlayer.mountId, null)
+  } finally {
+    restoreLocalStorage()
+    if (originalWindow) Object.defineProperty(globalThis, 'window', originalWindow)
+    else Reflect.deleteProperty(globalThis, 'window')
+  }
+})
+
 test('waits for the final remote save before logging out', async () => {
   setActivePinia(createPinia())
   const player = usePlayerStore()
@@ -341,6 +387,82 @@ test('armor reduces incoming damage while weapon alone increases attack power', 
   assert.equal(player.hp, 94)
   assert.equal(player.takeDamage(1), 1)
   assert.equal(player.hp, 93)
+})
+
+test('seven equipment slots stack stats and replacement preserves the old item', () => {
+  setActivePinia(createPinia())
+  const player = usePlayerStore()
+  const items = [
+    player.createItem({ name: 'Kiếm', type: 'equipment', rarity: 'Hiếm', quantity: 1, slot: 'weapon', attackBonus: 8 }),
+    player.createItem({ name: 'Mũ', type: 'equipment', rarity: 'Tốt', quantity: 1, slot: 'helmet', defenseBonus: 3 }),
+    player.createItem({ name: 'Áo giáp', type: 'equipment', rarity: 'Sử thi', quantity: 1, slot: 'armor', defenseBonus: 5, hpBonus: 25 }),
+    player.createItem({ name: 'Găng tay', type: 'equipment', rarity: 'Tốt', quantity: 1, slot: 'gloves', attackBonus: 4 }),
+    player.createItem({ name: 'Giày', type: 'equipment', rarity: 'Hiếm', quantity: 1, slot: 'boots', attackSpeedBonus: 10, dodgeBonus: 0.08 }),
+    player.createItem({ name: 'Nhẫn', type: 'equipment', rarity: 'Sử thi', quantity: 1, slot: 'ring', attackBonus: 3, criticalBonus: 0.12 }),
+    player.createItem({ name: 'Dây chuyền', type: 'equipment', rarity: 'Huyền thoại', quantity: 1, slot: 'necklace', hpBonus: 40, mpBonus: 30 })
+  ]
+  for (const item of items) player.addItem(item)
+  for (const item of items) assert.equal(player.equipItem(item.id), true)
+
+  assert.equal(player.attackPower, 25)
+  assert.equal(player.defensePower, 8)
+  assert.equal(player.maxHp, 165)
+  assert.equal(player.maxMp, 80)
+  assert.equal(player.attackSpeed, 10)
+  assert.ok(Math.abs(player.criticalChance - 0.22) < 0.0001)
+  assert.ok(Math.abs(player.dodgeChance - 0.08) < 0.0001)
+
+  const replacement = player.createItem({
+    name: 'Kiếm thay thế',
+    type: 'equipment',
+    rarity: 'Huyền thoại',
+    quantity: 1,
+    slot: 'weapon',
+    attackBonus: 20
+  })
+  player.addItem(replacement)
+  assert.equal(player.equipItem(replacement.id), true)
+  assert.equal(player.attackPower, 37)
+  assert.equal(player.inventory.some(item => item.id === items[0].id), true)
+})
+
+test('equipping and unequipping persists equipment for the next game session', () => {
+  setActivePinia(createPinia())
+  const restoreLocalStorage = installLocalStorage()
+
+  try {
+    const player = usePlayerStore()
+    player.initializeGame()
+    const ring = player.createItem({
+      name: 'Nhẫn lưu',
+      type: 'equipment',
+      rarity: 'Hiếm',
+      quantity: 1,
+      slot: 'ring',
+      attackBonus: 4,
+      criticalBonus: 0.05
+    })
+    player.addItem(ring)
+    assert.equal(player.equipItem(ring.id), true)
+    assert.ok(Math.abs(player.criticalChance - 0.15) < 0.0001)
+
+    setActivePinia(createPinia())
+    const restored = usePlayerStore()
+    restored.initializeGame()
+    assert.equal(restored.equipment.ring?.name, 'Nhẫn lưu')
+    assert.ok(Math.abs(restored.criticalChance - 0.15) < 0.0001)
+
+    assert.equal(restored.unequipItem('ring'), true)
+    assert.equal(restored.equipment.ring, undefined)
+    assert.equal(restored.inventory.some(item => item.name === 'Nhẫn lưu'), true)
+
+    setActivePinia(createPinia())
+    const restoredAgain = usePlayerStore()
+    restoredAgain.initializeGame()
+    assert.equal(restoredAgain.equipment.ring, undefined)
+  } finally {
+    restoreLocalStorage()
+  }
 })
 
 test('keeps old armor saves working by treating their attack bonus as defense', () => {

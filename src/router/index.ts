@@ -6,7 +6,7 @@ const routes = [
     path: '/',
     name: 'Game',
     component: () => import('../views/GameView.vue'),
-    meta: { title: 'Chiênio Game - Auto Battle MVP' }
+    meta: { title: 'Nấm Lùn Tiến Lên' }
   },
   {
     path: '/settings',
@@ -18,7 +18,25 @@ const routes = [
     path: '/inventory',
     name: 'Inventory',
     component: () => import('../views/InventoryView.vue'),
-    meta: { title: 'Túi đồ', requiresAuth: true }
+    meta: { title: 'Túi đồ' }
+  },
+  {
+    path: '/activities',
+    name: 'Activities',
+    component: () => import('../views/ActivitiesView.vue'),
+    meta: { title: 'Hoạt động' }
+  },
+  {
+    path: '/shop',
+    name: 'Shop',
+    component: () => import('../views/ShopView.vue'),
+    meta: { title: 'Cửa hàng' }
+  },
+  {
+    path: '/progression',
+    name: 'Progression',
+    component: () => import('../views/ProgressionView.vue'),
+    meta: { title: 'Tiến trình nâng cấp' }
   }
 ]
 

@@ -54,6 +54,10 @@ This is an authenticated-session-only vertical slice. Simulation state is curren
 
 ## Prototype controls
 
+- Open the character skill screen from **Nhân Vật** and the companion screen from **Đồng Hành** at the bottom of the game. Skill and companion collections are visual prototypes; quick equip changes only the current screen state, and upgrade/progression is not connected yet.
+- The **Phó Bản**, **Gia Viên**, and **Gia Tộc** buttons open original previews for world exploration, farming, and guild locations. The lantern upgrade preview is linked from the shop's summon screen. These activities are not connected to saved progression.
+- **Tiệm** opens the summon and shop prototype, with previews for skill/companion summons, crystal packs, themed bundles, rotating offers, and costumes. All shop actions are presentation-only; purchasing, payment, and summon rewards are not connected. Click the player portrait to open the profile utility drawer.
+- The **Thú Cưỡi** panel links to mount upgrade, empowerment, advanced mounts, and appearance previews. The profile drawer also links to the original-style **Thần Khí** upgrade, enchantment, and appearance screens. Progression controls do not consume items or save changes.
 - Turn Auto Battle on or off with the button at the bottom of the screen.
 - When Auto is off, move with WASD or the arrow keys.
 - When Auto is off, click the ground to walk to that horizontal position; clicking a monster still selects it. Keyboard or touch movement cancels the click destination.

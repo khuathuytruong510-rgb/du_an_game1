@@ -1,347 +1,584 @@
 import Phaser from 'phaser'
 import { usePlayerStore } from '../stores/player'
 import { rollGoldReward } from '../game/systems/rewards'
+import { claimMonsterDefeat, tryGrantEquipmentDrop } from '../game/systems/equipmentLoot'
+import type { MountId } from '../game/persistence/gameSettings'
 
-type Platform = { x: number; y: number; width: number; height: number }
-type Coin = { body: Phaser.GameObjects.Arc; shine: Phaser.GameObjects.Arc; taken: boolean }
-type Foe = { body: Phaser.GameObjects.Container; min: number; max: number; direction: number; alive: boolean }
+type MonsterKind = 'slime' | 'wolf' | 'goblin' | 'boss'
 
-const WIDTH = 2600
-const HEIGHT = 700
-const PLAYER_SPEED = 260
-const PLAYER_JUMP = 590
+interface MonsterView {
+  id: string
+  kind: MonsterKind
+  name: string
+  container: Phaser.GameObjects.Container
+  hpBar: Phaser.GameObjects.Graphics
+  hp: number
+  maxHp: number
+  attack: number
+  alive: boolean
+  respawnAt: number
+  x: number
+}
+
+const MONSTER_DATA: Record<MonsterKind, { name: string; hp: number; attack: number; color: number }> = {
+  slime: { name: 'Slime lá', hp: 55, attack: 7, color: 0x58b95a },
+  wolf: { name: 'Sói tuyết', hp: 85, attack: 10, color: 0x91b6cd },
+  goblin: { name: 'Goblin', hp: 120, attack: 13, color: 0x78a96a },
+  boss: { name: 'Bạch Hổ', hp: 240, attack: 18, color: 0xe9eef0 }
+}
 
 export default class WorldScene extends Phaser.Scene {
   private readonly store = usePlayerStore()
   private player!: Phaser.GameObjects.Container
-  private playerGraphics!: Phaser.GameObjects.Graphics
-  private platforms: Platform[] = []
-  private readonly spikePositions = [475, 1090, 1330, 1675, 2210]
-  private coins: Coin[] = []
-  private foes: Foe[] = []
-  private keys!: Record<'left' | 'right' | 'leftArrow' | 'rightArrow' | 'jump' | 'up' | 'attack' | 'pause', Phaser.Input.Keyboard.Key>
-  private velocityY = 0
-  private grounded = false
-  private facing = 1
-  private paused = true
-  private ended = false
-  private hearts = 3
-  private score = 0
-  private checkpoint = 110
-  private jumpQueued = false
-  private attackQueued = false
-  private overlay!: Phaser.GameObjects.Container
-  private overlayText!: Phaser.GameObjects.Text
-  private overlayButtonLabel!: Phaser.GameObjects.Text
-  private hud!: Phaser.GameObjects.Text
-  private touchLeft = false
-  private touchRight = false
-  private touchJump = false
-  private touchAttack = false
-  private touchEvents = {
-    left: (pressed: boolean) => { this.touchLeft = pressed },
-    right: (pressed: boolean) => { this.touchRight = pressed },
-    jump: (pressed: boolean) => { if (pressed) this.jumpQueued = true; this.touchJump = pressed },
-    attack: (pressed: boolean) => { if (pressed) this.attackQueued = true; this.touchAttack = pressed }
+  private companion!: Phaser.GameObjects.Image
+  private mountSprite: Phaser.GameObjects.Image | null = null
+  private playerShadow!: Phaser.GameObjects.Ellipse
+  private playerHpBar!: Phaser.GameObjects.Graphics
+  private monsters: MonsterView[] = []
+  private selectedMonsterId: string | null = null
+  private autoEnabled = false
+  private autoElapsed = 0
+  private monsterAttackElapsed = 0
+  private attackCooldownUntil = 0
+  private skillCooldownUntil = 0
+  private playerRespawnAt = 0
+  private paused = false
+
+  constructor() {
+    super({ key: 'World' })
   }
 
-  constructor() { super({ key: 'World' }) }
-
   create() {
-    const { width, height } = this.scale
-    this.paused = true
-    this.ended = false
-    this.hearts = 3
-    this.score = 0
-    this.checkpoint = 110
-    this.velocityY = 0
-    this.grounded = false
-    this.facing = 1
-    this.jumpQueued = false
-    this.attackQueued = false
-    this.touchLeft = this.touchRight = this.touchJump = this.touchAttack = false
-    this.coins = []
-    this.foes = []
-    this.cameras.main.setBackgroundColor('#8bd8ee')
-    this.drawBackdrop(width, height)
-    this.buildLevel()
-    this.createHero()
-    this.createCoins()
-    this.createFoes()
-    this.createHud(width)
-    this.keys = this.input.keyboard!.addKeys({
-      left: Phaser.Input.Keyboard.KeyCodes.A,
-      right: Phaser.Input.Keyboard.KeyCodes.D,
-      leftArrow: Phaser.Input.Keyboard.KeyCodes.LEFT,
-      rightArrow: Phaser.Input.Keyboard.KeyCodes.RIGHT,
-      jump: Phaser.Input.Keyboard.KeyCodes.SPACE,
-      up: Phaser.Input.Keyboard.KeyCodes.W,
-      attack: Phaser.Input.Keyboard.KeyCodes.J,
-      pause: Phaser.Input.Keyboard.KeyCodes.ESC
-    }) as typeof this.keys
-    this.input.keyboard!.on('keydown-SPACE', this.queueJump, this)
-    this.input.keyboard!.on('keydown-J', this.queueAttack, this)
-    this.input.keyboard!.on('keydown-P', this.togglePause, this)
-    this.game.events.on('platform:move', this.handleMove, this)
-    this.game.events.on('platform:pause', this.togglePause, this)
-    this.cameras.main.setBounds(0, 0, WIDTH, HEIGHT)
-    this.cameras.main.startFollow(this.player, true, 0.08, 0.12)
-    this.createOverlay(width, height)
-    this.events.once(Phaser.Scenes.Events.SHUTDOWN, this.shutdown, this)
-    this.events.once(Phaser.Scenes.Events.DESTROY, this.shutdown, this)
+    this.load.image('battlefield', '/assets/rpg-battlefield.svg')
+    this.load.image('battlefield-supplied', '/assets/legend-package/battlefield-supplied.png')
+    this.load.image('forest-road', '/assets/legend-of-mushroom/forest-road.png')
+    this.load.image('mushroom-companion', '/assets/supplied/mushroom-companion.png')
+    this.load.image('pumpkin-companion', '/assets/legend-package/monster-mushroom-supplied.png')
+    this.load.image('mount-ice-dragon', '/assets/supplied/mount-ice-dragon.png')
+    this.load.image('mount-mechanical-frog', '/assets/supplied/mount-mechanical-frog.png')
+    this.load.image('hero', '/assets/hero-mushroom.svg')
+    this.load.image('hero-scout', '/assets/hero-scout.svg')
+    this.load.image('slime', '/assets/slime.svg')
+    this.load.image('wolf', '/assets/wolf.svg')
+    this.load.image('goblin', '/assets/goblin.svg')
+    this.load.image('boss', '/assets/boss-tiger.svg')
+    this.load.image('effect-slash', '/assets/effect-slash.svg')
+    this.load.image('effect-hit', '/assets/effect-hit.svg')
+    this.load.once(Phaser.Loader.Events.COMPLETE, () => this.buildBattleScene())
+    this.load.start()
+  }
+
+  private buildBattleScene() {
+    this.createBattlefield()
+    this.createPlayer()
+    this.createMonsters()
+    this.registerEvents()
+    this.paused = false
+    this.autoEnabled = this.store.autoBattle
+    this.playerRespawnAt = this.store.hp <= 0 ? this.time.now + 2500 : 0
   }
 
   update(_time: number, delta: number) {
-    if (this.paused || this.ended) return
-    const dt = Math.min(delta, 34) / 1000
-    const left = this.keys.left.isDown || this.keys.leftArrow.isDown || this.touchLeft
-    const right = this.keys.right.isDown || this.keys.rightArrow.isDown || this.touchRight
-    const direction = Number(right) - Number(left)
-    if (direction) this.facing = direction
-    this.player.x = Phaser.Math.Clamp(this.player.x + direction * PLAYER_SPEED * dt, 25, WIDTH - 25)
-    this.playerGraphics.setScale(this.facing, 1)
-    if ((this.keys.jump.isDown || this.keys.up.isDown || this.touchJump) && this.grounded) this.jumpQueued = true
-    if (this.jumpQueued && this.grounded) {
-      this.velocityY = -PLAYER_JUMP
-      this.grounded = false
-    }
-    this.jumpQueued = false
-    this.velocityY = Math.min(this.velocityY + 1500 * dt, 850)
-    const oldBottom = this.player.y + 27
-    this.player.y += this.velocityY * dt
-    this.grounded = false
-    for (const platform of this.platforms) {
-      const crosses = oldBottom <= platform.y && this.player.y + 27 >= platform.y
-      const overlaps = this.player.x + 14 > platform.x && this.player.x - 14 < platform.x + platform.width
-      if (this.velocityY >= 0 && crosses && overlaps) {
-        this.player.y = platform.y - 27
-        this.velocityY = 0
-        this.grounded = true
+    if (this.paused) return
+    this.autoElapsed += Math.min(delta, 100)
+    this.monsterAttackElapsed += Math.min(delta, 100)
+
+    if (this.store.hp <= 0) {
+      if (this.playerRespawnAt > 0 && this.time.now >= this.playerRespawnAt) {
+        this.respawnPlayer()
+      } else {
+        return
       }
     }
-    if (this.player.y > HEIGHT + 90) this.takeHit(true)
-    if (this.attackQueued || this.keys.attack.isDown || this.touchAttack) this.attack()
-    this.attackQueued = false
-    this.updateCoins()
-    this.updateFoes(dt)
-    this.updateCheckpoint()
-    if (this.player.x > WIDTH - 100 && this.player.y > 400) this.finish(true)
-    this.hud.setText(`❤ ${'♥'.repeat(this.hearts)}${'♡'.repeat(3 - this.hearts)}     ★ ${this.score}     🪙 ${this.store.gold}     CHẶNG ${this.player.x < 850 ? '1' : this.player.x < 1650 ? '2' : '3'} / 3`)
-  }
-
-  private drawBackdrop(width: number, height: number) {
-    const sky = this.add.graphics()
-    sky.fillGradientStyle(0x8bd8ee, 0xd7f4d2, 0x8bd8ee, 0xd7f4d2, 1)
-    sky.fillRect(0, 0, WIDTH, HEIGHT)
-    sky.setScrollFactor(0.15)
-    for (let x = 100; x < WIDTH; x += 440) {
-      const hill = this.add.ellipse(x, 510, 570, 190, 0x76bd83).setDepth(-2).setScrollFactor(0.32)
-      const tree = this.add.graphics().setDepth(-1).setScrollFactor(0.45)
-      tree.fillStyle(0x557c55, 1); tree.fillRect(x + 165, 380, 20, 95)
-      tree.fillStyle(0x428d63, 1); tree.fillCircle(x + 175, 375, 48)
-      void hill
+    if (this.autoEnabled && this.autoElapsed >= 850) {
+      this.autoElapsed = 0
+      this.autoAttack(this.time.now)
     }
-    this.add.text(30, 20, 'NẤM LÙN TIẾN LÊN', { fontFamily: 'Arial', fontSize: '25px', fontStyle: 'bold', color: '#295b4c', stroke: '#efffc8', strokeThickness: 5 }).setScrollFactor(0).setDepth(20)
-    void width; void height
+    if (this.monsterAttackElapsed >= 1900) {
+      this.monsterAttackElapsed = 0
+      const target = this.getLivingMonsters()[0]
+      if (target) this.monsterAttack(target)
+    }
+
+    for (const monster of this.monsters) {
+      if (!monster.alive && monster.respawnAt > 0 && this.time.now >= monster.respawnAt) {
+        this.respawnMonster(monster)
+      }
+    }
   }
 
-  private buildLevel() {
-    this.platforms = [
-      { x: 0, y: 590, width: 520, height: 110 }, { x: 610, y: 545, width: 230, height: 155 },
-      { x: 920, y: 590, width: 500, height: 110 }, { x: 1500, y: 530, width: 260, height: 170 },
-      { x: 1830, y: 590, width: 420, height: 110 }, { x: 2350, y: 550, width: 250, height: 150 },
-      { x: 320, y: 445, width: 140, height: 24 }, { x: 1010, y: 435, width: 150, height: 24 },
-      { x: 1235, y: 365, width: 120, height: 24 }, { x: 1940, y: 435, width: 135, height: 24 },
-      { x: 2135, y: 370, width: 120, height: 24 }
+  private createBattlefield() {
+    const width = this.scale.width
+    const height = this.scale.height
+    this.cameras.main.setBackgroundColor('#86d7c2')
+    const battlefieldKey = this.textures.exists('battlefield-supplied') ? 'battlefield-supplied' : 'battlefield'
+    const portrait = height > width * 1.25
+    const battlefield = this.add.image(width / 2, height / 2, battlefieldKey)
+    if (portrait) {
+      battlefield.setDisplaySize(width, height)
+    } else {
+      battlefield.setDisplaySize(width, height)
+    }
+    battlefield.setDepth(-20)
+    if (!portrait && this.textures.exists('forest-road')) {
+      this.add.image(width / 2, height * 0.75, 'forest-road')
+        .setDisplaySize(width, width * 510 / 2048)
+        .setDepth(-19)
+    }
+  }
+
+  private createPlayer() {
+    const width = this.scale.width
+    const portrait = this.scale.height > this.scale.width * 1.25
+    const x = portrait ? width * 0.23 : Math.min(220, width * 0.18)
+    const y = this.scale.height * (portrait ? 0.39 : 0.50)
+    this.playerShadow = this.add.ellipse(x, y + (portrait ? 96 : 70), portrait ? 92 : 110, portrait ? 22 : 24, 0x1d582f, 0.42)
+    const body = this.add.container(x, y)
+    const hero = this.add.image(0, 0, this.store.playerAvatar === 'hero-scout' ? 'hero-scout' : 'hero')
+      .setDisplaySize(portrait ? 160 : 190, portrait ? 190 : 220)
+    const aura = this.add.ellipse(0, portrait ? 68 : 78, portrait ? 140 : 150, portrait ? 28 : 28, 0x79cced, 0.24)
+      .setStrokeStyle(4, 0xcbefff, 0.72)
+    body.add([aura, hero])
+    body.setDepth(12)
+    this.player = body
+    this.applyMount(this.store.mountId)
+    this.companion = this.add.image(x + (portrait ? 88 : 105), y + (portrait ? 24 : 24), 'pumpkin-companion')
+      .setDisplaySize(portrait ? 84 : 100, portrait ? 84 : 100)
+      .setDepth(13)
+
+    this.add.text(x, y - (portrait ? 108 : 106), `${this.store.playerName} · Lv.${this.store.level}`, {
+      fontFamily: 'Arial',
+      fontSize: portrait ? '12px' : '15px',
+      fontStyle: 'bold',
+      color: '#ffffff',
+      stroke: '#24483f',
+      strokeThickness: 5
+    }).setOrigin(0.5).setDepth(13)
+    this.playerHpBar = this.add.graphics().setDepth(14)
+    this.drawPlayerHp()
+
+    this.tweens.add({
+      targets: body,
+      y: y - 5,
+      duration: 900,
+      yoyo: true,
+      repeat: -1,
+      ease: 'Sine.InOut'
+    })
+    this.tweens.add({
+      targets: this.companion,
+      y: this.companion.y - 7,
+      duration: 720,
+      yoyo: true,
+      repeat: -1,
+      ease: 'Sine.InOut'
+    })
+  }
+
+  private drawPlayerHp() {
+    if (!this.player || !this.playerHpBar) return
+    const x = this.player.x
+    const portrait = this.scale.height > this.scale.width * 1.25
+    const y = this.player.y - (portrait ? 102 : 82)
+    this.playerHpBar.clear()
+    this.playerHpBar.fillStyle(0x442f34, 1)
+    this.playerHpBar.fillRoundedRect(x - 48, y, 96, 12, 6)
+    this.playerHpBar.fillStyle(0x4ebc64, 1)
+    this.playerHpBar.fillRoundedRect(x - 46, y + 2, 92 * (this.store.hp / this.store.maxHp), 8, 5)
+  }
+
+  private createMonsters() {
+    const width = this.scale.width
+    const portrait = this.scale.height > this.scale.width * 1.25
+    const y = this.scale.height * (portrait ? 0.39 : 0.49)
+    const positions = [
+      { kind: 'slime' as const, x: width * 0.50 },
+      { kind: 'wolf' as const, x: width * 0.65 },
+      { kind: 'goblin' as const, x: width * 0.79 },
+      { kind: 'boss' as const, x: width * 0.92 }
     ]
-    const g = this.add.graphics()
-    for (const p of this.platforms) {
-      g.fillStyle(0x754b35, 1); g.fillRoundedRect(p.x, p.y, p.width, p.height, 8)
-      g.fillStyle(0x69b84f, 1); g.fillRoundedRect(p.x, p.y, p.width, Math.min(18, p.height), 8)
-      g.fillStyle(0x8f6342, 0.75)
-      for (let x = p.x + 16; x < p.x + p.width - 10; x += 45) g.fillCircle(x, p.y + 43, 3)
+
+    for (const position of positions) {
+      const data = MONSTER_DATA[position.kind]
+      const container = this.add.container(position.x, y)
+      const shadow = this.add.ellipse(0, 68, 100, 20, 0x24513a, 0.35)
+      const displaySize = position.kind === 'boss'
+        ? portrait ? { width: 165, height: 135 } : { width: 180, height: 150 }
+        : position.kind === 'wolf'
+          ? portrait ? { width: 145, height: 145 } : { width: 140, height: 140 }
+          : position.kind === 'goblin'
+            ? portrait ? { width: 145, height: 120 } : { width: 145, height: 118 }
+            : portrait ? { width: 140, height: 125 } : { width: 135, height: 125 }
+      const monster = this.add.image(0, 0, position.kind)
+        .setDisplaySize(displaySize.width, displaySize.height)
+      container.add(monster)
+      container.add(shadow)
+      container.setSize(140, 150).setInteractive({ useHandCursor: true })
+      container.on('pointerdown', () => this.selectMonster(position.kind === 'boss' ? 'boss' : position.kind))
+      container.setDepth(10)
+
+      const hpBar = this.add.graphics().setDepth(11)
+      const view: MonsterView = {
+        id: position.kind,
+        kind: position.kind,
+        name: data.name,
+        container,
+        hpBar,
+        hp: data.hp,
+        maxHp: data.hp,
+        attack: data.attack,
+        alive: true,
+        respawnAt: 0,
+        x: position.x
+      }
+      this.monsters.push(view)
+      this.drawMonsterHp(view)
+      this.tweens.add({
+        targets: container,
+        y: y - 7,
+        duration: 700 + positions.indexOf(position) * 180,
+        yoyo: true,
+        repeat: -1,
+        ease: 'Sine.InOut'
+      })
     }
-    const spikes = this.add.graphics()
-    for (const x of [475, 1090, 1330, 1675, 2210]) {
-      const surface = this.platforms.find(platform => x >= platform.x && x < platform.x + platform.width)?.y ?? 590
-      spikes.fillStyle(0xe9f1ce, 1)
-      for (let i = 0; i < 4; i++) spikes.fillTriangle(x + i * 17, surface, x + 8 + i * 17, surface - 25, x + 17 + i * 17, surface)
+
+    this.selectMonster('slime')
+  }
+
+  private drawMonsterHp(monster: MonsterView) {
+    monster.hpBar.clear()
+    if (!monster.alive) return
+    const width = monster.kind === 'boss' ? 105 : 82
+    const y = monster.container.y - (monster.kind === 'boss' ? 118 : 92)
+    monster.hpBar.fillStyle(0x442f34, 1)
+    monster.hpBar.fillRoundedRect(monster.container.x - width / 2, y, width, 13, 6)
+    monster.hpBar.fillStyle(monster.kind === 'slime' ? 0x72c94e : 0xe25a55, 1)
+    monster.hpBar.fillRoundedRect(monster.container.x - width / 2 + 2, y + 2, (width - 4) * (monster.hp / monster.maxHp), 9, 5)
+  }
+
+  private selectMonster(id: string) {
+    const monster = this.monsters.find(candidate => candidate.id === id && candidate.alive)
+    if (!monster) return
+    this.selectedMonsterId = id
+    this.store.currentTarget = monster.name
+    this.store.currentTargetId = id
+    this.store.currentTargetHp = monster.hp
+    this.store.currentTargetMaxHp = monster.maxHp
+    this.store.currentTargetInRange = true
+  }
+
+  private getLivingMonsters() {
+    return this.monsters.filter(monster => monster.alive)
+  }
+
+  private cycleMonster(direction: 1 | -1) {
+    const livingMonsters = this.getLivingMonsters()
+    if (livingMonsters.length === 0) return
+
+    const selectedIndex = livingMonsters.findIndex(monster => monster.id === this.selectedMonsterId)
+    const startIndex = selectedIndex < 0 ? (direction > 0 ? -1 : 0) : selectedIndex
+    const nextIndex = (startIndex + direction + livingMonsters.length) % livingMonsters.length
+    this.selectMonster(livingMonsters[nextIndex].id)
+  }
+
+  private nextMonster = () => this.cycleMonster(1)
+  private previousMonster = () => this.cycleMonster(-1)
+
+  private registerEvents() {
+    this.game.events.on('combat:attack', this.basicAttack, this)
+    this.game.events.on('combat:skill', this.useSkill, this)
+    this.game.events.on('combat:item', this.usePotion, this)
+    this.game.events.on('combat:auto', this.toggleAuto, this)
+    this.game.events.on('combat:target', this.selectMonster, this)
+    this.game.events.on('target:next', this.nextMonster, this)
+    this.game.events.on('target:previous', this.previousMonster, this)
+    this.game.events.on('combat:pause', this.togglePause, this)
+    this.game.events.on('combat:reset', this.resetBattle, this)
+    this.game.events.on('mount:change', this.applyMount, this)
+    this.game.events.on('auto:toggle', this.toggleAuto, this)
+  }
+
+  private applyMount = (mountId: MountId | null) => {
+    this.mountSprite?.destroy()
+    this.mountSprite = null
+    if (!mountId) return
+
+    const texture = mountId === 'ice-dragon' ? 'mount-ice-dragon' : 'mount-mechanical-frog'
+    const portrait = this.scale.height > this.scale.width * 1.25
+    const size = mountId === 'ice-dragon'
+      ? portrait ? { width: 220, height: 220 } : { width: 170, height: 170 }
+      : portrait ? { width: 220, height: 180 } : { width: 170, height: 139 }
+    this.mountSprite = this.add.image(0, portrait ? 125 : 82, texture)
+      .setDisplaySize(size.width, size.height)
+    this.player.addAt(this.mountSprite, 1)
+  }
+
+  private basicAttack = () => {
+    if (this.paused || this.time.now < this.attackCooldownUntil) return
+    this.attackCooldownUntil = this.time.now + Math.max(300, 650 - this.store.attackSpeed * 12)
+    this.performAttack(false)
+  }
+
+  private useSkill = () => {
+    if (this.paused || this.time.now < this.skillCooldownUntil) return
+    if (this.store.mp < 20) {
+      this.store.autoMessage = 'Không đủ MP để dùng kỹ năng'
+      return
     }
-    for (const x of [1000, 1900, 2380]) {
-      this.add.rectangle(x, 500, 5, 96, 0x614532)
-      this.add.circle(x, 497, 8, 0xffdf67)
-      this.add.text(x + 14, 474, '⚑', { fontSize: '26px' })
-    }
-    this.add.rectangle(WIDTH - 80, 497, 8, 105, 0x603c35).setOrigin(0.5, 0)
-    this.add.circle(WIDTH - 80, 494, 11, 0xffdc5c)
-    const sign = this.add.text(WIDTH - 150, 457, 'ĐÍCH', { fontSize: '20px', fontStyle: 'bold', color: '#fff4bf', backgroundColor: '#497b54', padding: { x: 8, y: 5 } }).setOrigin(0.5)
-    this.add.container(0, 0, [sign]).setDepth(4)
+    this.skillCooldownUntil = this.time.now + 3500
+    this.store.mp -= 20
+    this.performAttack(true)
   }
 
-  private createHero() {
-    this.playerGraphics = this.add.graphics()
-    this.playerGraphics.fillStyle(0xf1c893, 1); this.playerGraphics.fillCircle(0, 7, 11)
-    this.playerGraphics.fillStyle(0xe74c3c, 1); this.playerGraphics.fillEllipse(0, -7, 34, 20)
-    this.playerGraphics.fillStyle(0xb82f35, 1); this.playerGraphics.fillEllipse(0, -16, 45, 13)
-    this.playerGraphics.fillStyle(0x352d40, 1); this.playerGraphics.fillCircle(4, 5, 2)
-    this.playerGraphics.fillStyle(0x4e7cda, 1); this.playerGraphics.fillRoundedRect(-10, 14, 20, 15, 4)
-    this.playerGraphics.fillStyle(0x463b37, 1); this.playerGraphics.fillRoundedRect(-13, 25, 11, 5, 2); this.playerGraphics.fillRoundedRect(3, 25, 11, 5, 2)
-    this.player = this.add.container(110, 563, [this.playerGraphics]).setDepth(5)
-    this.add.text(110, 522, 'Nấm Lùn', { fontSize: '13px', fontStyle: 'bold', color: '#fff', stroke: '#326144', strokeThickness: 4 }).setOrigin(0.5).setDepth(6)
-  }
-
-  private createCoins() {
-    for (const [x, y] of [[250, 515], [350, 400], [420, 400], [685, 470], [755, 470], [1000, 540], [1080, 390], [1275, 320], [1555, 480], [1625, 480], [1975, 390], [2165, 325], [2440, 500]] as number[][]) {
-      const body = this.add.circle(x, y, 10, 0xffdf64).setStrokeStyle(3, 0xf8a92e).setDepth(3)
-      const shine = this.add.circle(x, y, 4, 0xfff7b8).setDepth(4)
-      this.coins.push({ body, shine, taken: false })
+  private usePotion = () => {
+    if (this.store.useHealingPotion()) {
+      this.store.autoMessage = 'Đã dùng thuốc hồi phục'
+      this.drawPlayerHp()
+      this.showFloat(this.player.x, this.player.y - 100, '+50 HP', '#72ef90')
     }
   }
 
-  private createFoes() {
-    for (const x of [720, 1100, 1580, 2020, 2410]) {
-      const platform = this.platforms.find(item => x >= item.x && x < item.x + item.width)!
-      const body = this.add.container(x, platform.y - 18).setDepth(4)
-      body.add(this.add.circle(0, 0, 18, 0x9b72c7).setStrokeStyle(3, 0xe5d7ff))
-      body.add(this.add.circle(-6, -4, 3, 0xffffff)); body.add(this.add.circle(6, -4, 3, 0xffffff))
-      this.foes.push({ body, min: Math.max(platform.x + 30, x - 60), max: Math.min(platform.x + platform.width - 30, x + 60), direction: 1, alive: true })
-    }
-  }
-
-  private createHud(width: number) {
-    this.hud = this.add.text(0, 20, '', { fontFamily: 'Arial', fontSize: '19px', fontStyle: 'bold', color: '#fff', stroke: '#315641', strokeThickness: 5 }).setScrollFactor(0).setDepth(30)
-    this.hud.setPosition(width - 24, 22).setOrigin(1, 0)
-    const hint = this.add.text(22, 61, 'A/D hoặc ←/→ di chuyển  ·  SPACE/W nhảy  ·  J đánh  ·  P tạm dừng', { fontSize: '14px', color: '#fff', stroke: '#315641', strokeThickness: 4 }).setScrollFactor(0).setDepth(30)
-    void hint
-  }
-
-  private createOverlay(width: number, height: number) {
-    const shade = this.add.rectangle(width / 2, height / 2, width, height, 0x18354a, 0.7)
-    const card = this.add.rectangle(width / 2, height / 2, 510, 275, 0xfff1d2, 0.98).setStrokeStyle(5, 0x81553c)
-    const title = this.add.text(width / 2, height / 2 - 83, 'NẤM LÙN TIẾN LÊN', { fontSize: '38px', fontStyle: 'bold', color: '#408a53', stroke: '#fff', strokeThickness: 4 }).setOrigin(0.5)
-    this.overlayText = this.add.text(width / 2, height / 2 - 17, 'Chạy qua ba chặng, gom xu và đánh bại quái vật.\nCẩn thận hố sâu và gai nhọn!', { fontSize: '17px', color: '#54453c', align: 'center', lineSpacing: 8 }).setOrigin(0.5)
-    const button = this.add.rectangle(width / 2, height / 2 + 83, 210, 53, 0x60ae55).setStrokeStyle(3, 0x387043).setInteractive({ useHandCursor: true })
-    this.overlayButtonLabel = this.add.text(width / 2, height / 2 + 83, 'BẮT ĐẦU  ▶', { fontSize: '21px', fontStyle: 'bold', color: '#fff' }).setOrigin(0.5)
-    this.overlay = this.add.container(0, 0, [shade, card, title, this.overlayText, button, this.overlayButtonLabel]).setScrollFactor(0).setDepth(100)
-    button.on('pointerdown', () => this.handleOverlayAction())
-    this.overlayText.setText('Chạy qua ba chặng, gom xu và đánh bại quái vật.\nCẩn thận hố sâu và gai nhọn!')
-    this.scale.on(Phaser.Scale.Events.RESIZE, this.layoutOverlay, this)
-  }
-
-  private layoutOverlay = () => {
-    if (!this.overlay?.active) return
-    const width = this.scale.width; const height = this.scale.height
-    for (const item of this.overlay.list) {
-      if ('setPosition' in item && item instanceof Phaser.GameObjects.Rectangle) item.setPosition(width / 2, height / 2)
-      else if ('setPosition' in item && item instanceof Phaser.GameObjects.Text) item.setPosition(width / 2, height / 2)
-    }
-    const [shade, card, title, text, button, label] = this.overlay.list as Phaser.GameObjects.GameObject[]
-    ;(shade as Phaser.GameObjects.Rectangle).setSize(width, height)
-    ;(card as Phaser.GameObjects.Rectangle).setSize(Math.min(510, width - 32), 275)
-    ;(title as Phaser.GameObjects.Text).setY(height / 2 - 83)
-    ;(text as Phaser.GameObjects.Text).setY(height / 2 - 17)
-    ;(button as Phaser.GameObjects.Rectangle).setPosition(width / 2, height / 2 + 83)
-    ;(label as Phaser.GameObjects.Text).setPosition(width / 2, height / 2 + 83)
-  }
-
-  private handleOverlayAction() {
-    if (this.ended) { this.scene.restart(); return }
-    this.paused = !this.paused
-    this.overlay.setVisible(this.paused)
+  private toggleAuto = (enabled: boolean) => {
+    this.autoEnabled = Boolean(enabled)
   }
 
   private togglePause = () => {
-    if (this.ended) return
     this.paused = !this.paused
-    this.overlay.setVisible(this.paused)
-    this.overlayText.setText(this.paused ? 'Nghỉ một chút nhé!\nNhấn nút hoặc P để tiếp tục.' : '')
-    this.overlayButtonLabel.setText(this.paused ? 'TIẾP TỤC  ▶' : 'BẮT ĐẦU  ▶')
   }
 
-  private queueJump = () => { this.jumpQueued = true }
-  private queueAttack = () => { this.attackQueued = true }
-  private handleMove = (payload: { action: 'left' | 'right' | 'jump' | 'attack'; pressed: boolean }) => this.touchEvents[payload.action]?.(payload.pressed)
+  private resetBattle = () => {
+    this.scene.restart()
+  }
 
-  private attack() {
-    for (const foe of this.foes) {
-      const targetDistance = foe.body.x - this.player.x
-      if (!foe.alive || Math.abs(targetDistance) > 52 || Math.abs(foe.body.y - this.player.y) > 48 || targetDistance * this.facing < -8) continue
-      if (this.velocityY > 60 && this.player.y < foe.body.y) this.velocityY = -330
-      foe.alive = false
-      this.tweens.add({ targets: foe.body, alpha: 0, scale: 1.7, duration: 180, onComplete: () => foe.body.destroy() })
-      this.score += 100
-      this.store.gainExp(12)
-      this.store.gold += rollGoldReward(2, 6)
-      this.store.recordMonsterDefeat()
-      this.store.autoMessage = 'Quái vật đã bị đánh bại!'
+  private autoAttack(now: number) {
+    if (now < this.attackCooldownUntil) return
+    if (this.store.mp >= 20) {
+      this.useSkill()
+    } else {
+      this.basicAttack()
     }
   }
 
-  private updateCoins() {
-    for (const coin of this.coins) {
-      if (coin.taken || Phaser.Math.Distance.Between(this.player.x, this.player.y, coin.body.x, coin.body.y) > 32) continue
-      coin.taken = true
-      coin.body.destroy()
-      coin.shine.destroy()
-      this.score += 25
-      this.store.gold += 1
-      this.store.autoMessage = 'Nhặt được một đồng xu!'
+  private performAttack(skill: boolean) {
+    let monster = this.monsters.find(candidate =>
+      candidate.id === this.selectedMonsterId && candidate.alive
+    )
+    if (!monster) {
+      monster = this.getLivingMonsters()[0]
+      if (monster) this.selectMonster(monster.id)
     }
+    if (!monster) return
+
+    const base = this.store.attackPower
+    const critical = Math.random() < this.store.criticalChance
+    const damage = (skill ? base * 2 : base + Phaser.Math.Between(-2, 4)) * (critical ? 2 : 1)
+    monster.hp -= Math.max(1, damage)
+    this.drawMonsterHp(monster)
+    this.store.currentTargetHp = Math.max(0, monster.hp)
+
+    this.showAttackEffect(monster, skill)
+    if (skill) this.animateCompanionSkill(monster)
+    if (monster.hp <= 0) this.defeatMonster(monster)
   }
 
-  private updateFoes(dt: number) {
-    for (const foe of this.foes) {
-      if (!foe.alive) continue
-      foe.body.x += foe.direction * 65 * dt
-      if (foe.body.x < foe.min || foe.body.x > foe.max) foe.direction *= -1
-      if (Phaser.Math.Distance.Between(this.player.x, this.player.y, foe.body.x, foe.body.y) < 34) {
-        if (this.velocityY > 100 && this.player.y < foe.body.y - 8) {
-          foe.alive = false; foe.body.destroy(); this.velocityY = -370
-          this.score += 100; this.store.gainExp(12); this.store.recordMonsterDefeat()
-        } else this.takeHit()
+  private animateCompanionSkill(monster: MonsterView) {
+    const scaleX = this.companion.scaleX
+    const scaleY = this.companion.scaleY
+    this.tweens.add({
+      targets: this.companion,
+      x: monster.container.x - 100,
+      scaleX: scaleX * 1.15,
+      scaleY: scaleY * 1.15,
+      duration: 260,
+      yoyo: true,
+      ease: 'Sine.InOut'
+    })
+  }
+
+  private showAttackEffect(monster: MonsterView, skill: boolean) {
+    const targetX = monster.container.x
+    const targetY = monster.container.y
+
+    this.tweens.add({
+      targets: monster.container,
+      angle: skill ? 8 : -6,
+      yoyo: true,
+      duration: 55,
+      repeat: 1,
+      ease: 'Quad.InOut'
+    })
+
+    if (skill) {
+      const ring = this.add.image(targetX, targetY, 'effect-hit')
+        .setDisplaySize(150, 150)
+        .setAlpha(0.95)
+        .setDepth(28)
+      this.tweens.add({
+        targets: ring,
+        scale: 1.35,
+        alpha: 0,
+        duration: 300,
+        onComplete: () => ring.destroy()
+      })
+      for (let i = 0; i < 8; i++) {
+        const shard = this.add.star(targetX + Phaser.Math.Between(-40, 40), targetY + Phaser.Math.Between(-45, 45), 4, 4, 10, 0xc6f8ff)
+        this.tweens.add({ targets: shard, scale: 0, alpha: 0, duration: 500, delay: i * 25, onComplete: () => shard.destroy() })
       }
+    } else {
+      const slash = this.add.image(targetX, targetY, 'effect-slash')
+        .setDisplaySize(170, 170)
+        .setDepth(28)
+      this.tweens.add({
+        targets: slash,
+        x: targetX,
+        y: targetY,
+        scale: 1.8,
+        alpha: 0,
+        duration: 220,
+        onComplete: () => slash.destroy()
+      })
     }
-    for (const x of this.spikePositions) {
-      const platform = this.platforms.find(item => x >= item.x && x <= item.x + item.width)
-      if (!platform) continue
-      const onGroundAtSpikes = Math.abs(this.player.x - x - 34) < 37 &&
-        this.player.y + 26 > platform.y - 32 && this.player.y + 26 < platform.y + 12
-      if (onGroundAtSpikes) this.takeHit()
+
+    this.showFloat(targetX, targetY - 80, `-${skill ? this.store.attackPower * 2 : Math.max(1, this.store.attackPower)}`
+      , skill ? '#65ddff' : '#ffe17a')
+  }
+
+  private showFloat(x: number, y: number, text: string, color: string) {
+    const label = this.add.text(x, y, text, {
+      fontFamily: 'Arial',
+      fontSize: '24px',
+      fontStyle: 'bold',
+      color,
+      stroke: '#4b3342',
+      strokeThickness: 5
+    }).setOrigin(0.5).setDepth(30)
+    this.tweens.add({
+      targets: label,
+      y: y - 55,
+      alpha: 0,
+      duration: 700,
+      onComplete: () => label.destroy()
+    })
+  }
+
+  private defeatMonster(monster: MonsterView) {
+    if (!claimMonsterDefeat(monster)) return
+    monster.respawnAt = this.time.now + 5000
+    monster.hpBar.clear()
+    this.tweens.add({
+      targets: monster.container,
+      alpha: 0,
+      scale: 0.2,
+      y: monster.container.y + 35,
+      duration: 420,
+      onComplete: () => monster.container.setVisible(false)
+    })
+
+    const gold = rollGoldReward(monster.kind === 'boss' ? 30 : 5, monster.kind === 'boss' ? 50 : 12)
+    this.store.gold += gold
+    this.store.gainExp(monster.kind === 'boss' ? 60 : 18)
+    this.store.recordMonsterDefeat()
+    this.store.lootMessage = `${monster.name} bị đánh bại · +${gold} vàng`
+    this.store.autoMessage = `${monster.name} bị đánh bại`
+    this.showFloat(monster.container.x, monster.container.y - 100, 'K.O.', '#ffd36b')
+
+    tryGrantEquipmentDrop(
+      monster.kind,
+      Math.random,
+      () => this.store.createLootEquipment(monster.kind),
+      item => this.store.addItem(item)
+    )
+
+    const living = this.getLivingMonsters()
+    if (living[0]) this.selectMonster(living[0].id)
+  }
+
+  private respawnMonster(monster: MonsterView) {
+    const data = MONSTER_DATA[monster.kind]
+    monster.hp = data.hp
+    monster.maxHp = data.hp
+    monster.alive = true
+    monster.respawnAt = 0
+    monster.container.setVisible(true).setScale(1).setAlpha(1)
+    this.drawMonsterHp(monster)
+  }
+
+  private monsterAttack(monster: MonsterView) {
+    if (this.store.hp <= 0) return
+    const dodged = Math.random() < this.store.dodgeChance
+    this.animateMonsterAttack(monster, !dodged)
+    if (dodged) {
+      this.store.autoMessage = 'Né tránh thành công!'
+      this.showFloat(this.player.x, this.player.y - 100, 'NÉ TRÁNH', '#78dcff')
+      return
+    }
+    const damage = monster.attack
+    const actual = this.store.takeDamage(damage)
+    this.drawPlayerHp()
+    this.showFloat(this.player.x, this.player.y - 100, `-${actual}`, '#ff6c70')
+    this.cameras.main.shake(180, 0.006)
+    this.store.autoMessage = `${monster.name} tấn công · -${actual} HP`
+
+    if (this.store.hp <= 0) {
+      this.autoEnabled = false
+      this.store.autoBattle = false
+      this.playerRespawnAt = this.time.now + 2500
+      this.store.autoMessage = 'Đã bị đánh bại · đang hồi sinh'
     }
   }
 
-  private updateCheckpoint() {
-    for (const x of [1000, 1900, 2380]) if (this.player.x > x) this.checkpoint = x
+  private animateMonsterAttack(monster: MonsterView, hitsPlayer: boolean) {
+    this.tweens.add({
+      targets: monster.container,
+      x: Math.max(this.player.x + 120, monster.container.x - 30),
+      duration: 130,
+      yoyo: true,
+      ease: 'Quad.In',
+      onUpdate: () => this.drawMonsterHp(monster)
+    })
+
+    if (!hitsPlayer) return
+
+    const impact = this.add.image(this.player.x + 18, this.player.y + 12, 'effect-slash')
+      .setDisplaySize(105, 105)
+      .setTint(0xff6873)
+      .setAlpha(0.9)
+      .setDepth(28)
+    this.tweens.add({
+      targets: impact,
+      scale: 1.4,
+      alpha: 0,
+      duration: 240,
+      onComplete: () => impact.destroy()
+    })
+    this.tweens.add({
+      targets: this.player,
+      alpha: 0.45,
+      yoyo: true,
+      repeat: 1,
+      duration: 80
+    })
   }
 
-  private takeHit(fall = false) {
-    if (this.time.now < (this.registry.get('invulnerableUntil') ?? 0)) return
-    this.registry.set('invulnerableUntil', this.time.now + 1200)
-    this.hearts -= 1
-    this.velocityY = fall ? 0 : -260
-    this.player.x = this.checkpoint
-    this.player.y = 450
-    this.store.autoMessage = `Bị thương! Còn ${this.hearts} tim.`
-    this.cameras.main.shake(160, 0.008)
-    if (this.hearts <= 0) this.finish(false)
+  private respawnPlayer() {
+    this.playerRespawnAt = 0
+    this.store.restoreHealth(Math.ceil(this.store.maxHp * 0.5))
+    this.drawPlayerHp()
+    this.showFloat(this.player.x, this.player.y - 100, 'HỒI SINH', '#78dcff')
+    this.store.autoMessage = 'Đã hồi sinh · tiếp tục chiến đấu'
   }
 
-  private finish(won: boolean) {
-    this.ended = true
-    this.paused = true
-    this.overlayText.setText(won
-      ? `Bạn đã chinh phục cả ba chặng!\nĐiểm số: ${this.score}  ·  Vàng: ${this.store.gold}`
-      : `Hết tim mất rồi!\nĐiểm số: ${this.score}  ·  Hãy thử lại nhé.`)
-    this.overlayButtonLabel.setText('CHƠI LẠI  ↻')
-    this.overlay.setVisible(true)
-  }
-
-  private shutdown() {
-    this.game.events.off('platform:move', this.handleMove, this)
-    this.game.events.off('platform:pause', this.togglePause, this)
-    this.input.keyboard?.off('keydown-SPACE', this.queueJump, this)
-    this.input.keyboard?.off('keydown-J', this.queueAttack, this)
-    this.input.keyboard?.off('keydown-P', this.togglePause, this)
-    this.scale.off(Phaser.Scale.Events.RESIZE, this.layoutOverlay, this)
+  shutdown() {
+    this.game.events.off('combat:attack', this.basicAttack, this)
+    this.game.events.off('combat:skill', this.useSkill, this)
+    this.game.events.off('combat:item', this.usePotion, this)
+    this.game.events.off('combat:auto', this.toggleAuto, this)
+    this.game.events.off('combat:target', this.selectMonster, this)
+    this.game.events.off('target:next', this.nextMonster, this)
+    this.game.events.off('target:previous', this.previousMonster, this)
+    this.game.events.off('combat:pause', this.togglePause, this)
+    this.game.events.off('combat:reset', this.resetBattle, this)
+    this.game.events.off('auto:toggle', this.toggleAuto, this)
   }
 }

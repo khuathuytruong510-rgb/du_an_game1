@@ -1,6 +1,11 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { loadGameSettings, writeGameSettings } from './gameSettings'
+import {
+  loadGameSettings,
+  loadSelectedMount,
+  writeGameSettings,
+  writeSelectedMount
+} from './gameSettings'
 
 const createStorage = (initialValue: string | null = null) => {
   let value = initialValue
@@ -44,4 +49,32 @@ test('rejects invalid stored thresholds and reports write failures', () => {
     }
   }
   assert.equal(writeGameSettings(0.25, failingStorage), 'Không thể lưu cài đặt trên thiết bị này.')
+})
+
+test('persists and restores a selected mount independently of combat saves', () => {
+  const storage = createStorage()
+
+  assert.deepEqual(loadSelectedMount(storage), { mountId: null, error: null })
+  assert.equal(writeSelectedMount('mechanical-frog', storage), null)
+  assert.deepEqual(loadSelectedMount(storage), { mountId: 'mechanical-frog', error: null })
+
+  assert.equal(writeSelectedMount(null, storage), null)
+  assert.deepEqual(loadSelectedMount(storage), { mountId: null, error: null })
+})
+
+test('rejects corrupt mount settings and reports storage errors', () => {
+  assert.deepEqual(loadSelectedMount(createStorage('"not-a-mount"')), {
+    mountId: null,
+    error: 'Thú cưỡi đã lưu không hợp lệ; đã bỏ lựa chọn cũ.'
+  })
+
+  const failingStorage = {
+    getItem: () => { throw new Error('storage is unavailable') },
+    setItem: () => { throw new Error('storage is unavailable') }
+  }
+  assert.deepEqual(loadSelectedMount(failingStorage), {
+    mountId: null,
+    error: 'Không thể đọc thú cưỡi đã lưu trên thiết bị này.'
+  })
+  assert.equal(writeSelectedMount('ice-dragon', failingStorage), 'Không thể lưu thú cưỡi trên thiết bị này.')
 })

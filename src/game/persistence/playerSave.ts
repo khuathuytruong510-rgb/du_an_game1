@@ -3,6 +3,8 @@ import type { EquipmentSlot, InventoryItem, ItemRarity } from '../../stores/play
 export interface PlayerSaveData {
   version: 1
   savedAt: string
+  playerName: string
+  avatar: 'hero-mushroom' | 'hero-scout'
   level: number
   exp: number
   gold: number
@@ -23,8 +25,8 @@ export type LoadSaveResult =
   | { status: 'invalid'; message: string }
 
 const SAVE_KEY = 'chien-gioi.player.v1'
-const ITEM_RARITIES: ItemRarity[] = ['Thường', 'Tốt', 'Hiếm']
-const EQUIPMENT_SLOTS: EquipmentSlot[] = ['weapon', 'armor']
+const ITEM_RARITIES: ItemRarity[] = ['Thường', 'Tốt', 'Hiếm', 'Sử thi', 'Huyền thoại']
+const EQUIPMENT_SLOTS: EquipmentSlot[] = ['weapon', 'helmet', 'armor', 'gloves', 'boots', 'ring', 'necklace']
 const QUEST_IDS = ['slime-hunt', 'spirit-shards']
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
@@ -50,19 +52,14 @@ const isInventoryItem = (value: unknown): value is InventoryItem => {
 
   if (value.type === 'equipment') {
     if (value.healAmount !== undefined) return false
-    if (value.slot === 'weapon') {
-      return isFiniteInRange(value.attackBonus, 0, 1000) &&
-        (value.enhanceLevel === undefined ||
-          isFiniteInRange(value.enhanceLevel, 0, 3) && Number.isInteger(value.enhanceLevel)) &&
-        value.defenseBonus === undefined
+    if (!EQUIPMENT_SLOTS.includes(value.slot as EquipmentSlot)) return false
+    if (value.enhanceLevel !== undefined &&
+      (!isFiniteInRange(value.enhanceLevel, 0, 3) || !Number.isInteger(value.enhanceLevel))) return false
+    for (const field of ['attackBonus', 'defenseBonus', 'hpBonus', 'mpBonus', 'attackSpeedBonus', 'criticalBonus', 'dodgeBonus']) {
+      if (value[field] !== undefined &&
+        (!isFiniteInRange(value[field], 0, 1000) || (field.includes('Bonus') && typeof value[field] !== 'number'))) return false
     }
-    if (value.slot === 'armor') {
-      if (value.enhanceLevel !== undefined) return false
-      return value.attackBonus === undefined
-        ? isFiniteInRange(value.defenseBonus, 0, 1000)
-        : isFiniteInRange(value.attackBonus, 0, 1000) && value.defenseBonus === undefined
-    }
-    return false
+    return true
   }
 
   if (value.type === 'consumable') {
@@ -99,6 +96,16 @@ export const isPlayerSaveData = (value: unknown): value is PlayerSaveData => {
     value.version !== 1 ||
     typeof value.savedAt !== 'string' ||
     !Number.isFinite(Date.parse(value.savedAt))
+  ) return false
+  if (
+    value.playerName !== undefined &&
+    (typeof value.playerName !== 'string' ||
+      value.playerName.trim().length < 2 ||
+      value.playerName.trim().length > 24)
+  ) return false
+  if (
+    value.avatar !== undefined &&
+    !['hero-mushroom', 'hero-scout'].includes(String(value.avatar))
   ) return false
   if (
     !isFiniteInRange(value.level, 1, 30) ||

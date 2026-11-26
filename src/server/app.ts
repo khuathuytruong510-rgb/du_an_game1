@@ -13,6 +13,8 @@ const RATE_WINDOW_MS = 10 * 60 * 1000
 
 export interface ServerCharacter {
   version: 1
+  playerName?: string
+  avatar?: 'hero-mushroom' | 'hero-scout'
   level: number
   exp: number
   gold: number
@@ -93,6 +95,12 @@ export const isValidCharacter = (value: unknown): value is ServerCharacter => {
     typeof value.hp !== 'number' || !Number.isFinite(value.hp) || value.hp < 0 || value.hp > 200 ||
     typeof value.mp !== 'number' || !Number.isFinite(value.mp) || value.mp < 0 || value.mp > 150 ||
     typeof value.savedAt !== 'string' || !Number.isFinite(Date.parse(value.savedAt)) ||
+    (value.playerName !== undefined && (
+      typeof value.playerName !== 'string' ||
+      value.playerName.trim().length < 2 ||
+      value.playerName.trim().length > 24
+    )) ||
+    (value.avatar !== undefined && !['hero-mushroom', 'hero-scout'].includes(String(value.avatar))) ||
     !Array.isArray(value.inventory) || value.inventory.length > 20 ||
     !isRecord(value.equipment) || !Array.isArray(value.quests) || value.quests.length !== 2
   ) return false
@@ -124,38 +132,26 @@ export const isValidCharacter = (value: unknown): value is ServerCharacter => {
       typeof item.name !== 'string' ||
       item.name.length === 0 ||
       !['material', 'equipment', 'consumable'].includes(String(item.type)) ||
-      !['Thường', 'Tốt', 'Hiếm'].includes(String(item.rarity)) ||
+      !['Thường', 'Tốt', 'Hiếm', 'Sử thi', 'Huyền thoại'].includes(String(item.rarity)) ||
       !Number.isInteger(item.quantity) ||
       (item.quantity as number) < 1 ||
       (item.quantity as number) > 999 ||
       (equipmentItem && (
         item.healAmount !== undefined ||
-        (item.slot === 'weapon' && item.enhanceLevel !== undefined && (
+        !['weapon', 'helmet', 'armor', 'gloves', 'boots', 'ring', 'necklace'].includes(String(item.slot)) ||
+        (item.enhanceLevel !== undefined && (
           !Number.isInteger(item.enhanceLevel) ||
           (item.enhanceLevel as number) < 0 ||
           (item.enhanceLevel as number) > 3
         )) ||
-        (item.slot === 'armor' && item.enhanceLevel !== undefined) ||
-        (item.slot === 'weapon' && (
-          typeof item.attackBonus !== 'number' ||
-          !Number.isFinite(item.attackBonus) ||
-          item.attackBonus < 0 ||
-          item.attackBonus > 1000 ||
-          item.defenseBonus !== undefined
-        )) ||
-        (item.slot === 'armor' && (
-          item.attackBonus === undefined
-            ? typeof item.defenseBonus !== 'number' ||
-              !Number.isFinite(item.defenseBonus) ||
-              item.defenseBonus < 0 ||
-              item.defenseBonus > 1000
-            : typeof item.attackBonus !== 'number' ||
-              !Number.isFinite(item.attackBonus) ||
-              item.attackBonus < 0 ||
-              item.attackBonus > 1000 ||
-              item.defenseBonus !== undefined
-        )) ||
-        !['weapon', 'armor'].includes(String(item.slot))
+        ['attackBonus', 'defenseBonus', 'hpBonus', 'mpBonus', 'attackSpeedBonus', 'criticalBonus', 'dodgeBonus'].some(field =>
+          item[field] !== undefined && (
+            typeof item[field] !== 'number' ||
+            !Number.isFinite(item[field]) ||
+            (item[field] as number) < 0 ||
+            (item[field] as number) > 1000
+          )
+        )
       )) ||
       (item.type === 'consumable' && (
         item.name !== 'Thuốc hồi phục' ||
@@ -182,7 +178,7 @@ export const isValidCharacter = (value: unknown): value is ServerCharacter => {
 
   for (const [slot, item] of Object.entries(value.equipment)) {
     if (
-      !['weapon', 'armor'].includes(slot) ||
+      !['weapon', 'helmet', 'armor', 'gloves', 'boots', 'ring', 'necklace'].includes(slot) ||
       !isRecord(item) ||
       item.type !== 'equipment' ||
       item.slot !== slot ||
@@ -191,7 +187,7 @@ export const isValidCharacter = (value: unknown): value is ServerCharacter => {
       itemIds.has(item.id) ||
       typeof item.name !== 'string' ||
       item.name.length === 0 ||
-      !['Thường', 'Tốt', 'Hiếm'].includes(String(item.rarity)) ||
+      !['Thường', 'Tốt', 'Hiếm', 'Sử thi', 'Huyền thoại'].includes(String(item.rarity)) ||
       !Number.isInteger(item.quantity) ||
       item.quantity !== 1 ||
       item.healAmount !== undefined ||
@@ -201,25 +197,17 @@ export const isValidCharacter = (value: unknown): value is ServerCharacter => {
         (item.enhanceLevel as number) > 3
       )) ||
       (slot === 'armor' && item.enhanceLevel !== undefined) ||
-      (slot === 'weapon' && (
-        typeof item.attackBonus !== 'number' ||
-        !Number.isFinite(item.attackBonus) ||
-        item.attackBonus < 0 ||
-        item.attackBonus > 1000 ||
-        item.defenseBonus !== undefined
-      )) ||
-      (slot === 'armor' && (
-        item.attackBonus === undefined
-          ? typeof item.defenseBonus !== 'number' ||
-            !Number.isFinite(item.defenseBonus) ||
-            item.defenseBonus < 0 ||
-            item.defenseBonus > 1000
-          : typeof item.attackBonus !== 'number' ||
-            !Number.isFinite(item.attackBonus) ||
-            item.attackBonus < 0 ||
-            item.attackBonus > 1000 ||
-            item.defenseBonus !== undefined
-      ))
+      (slot === 'armor' &&
+        item.attackBonus !== undefined &&
+        item.defenseBonus !== undefined) ||
+      ['attackBonus', 'defenseBonus', 'hpBonus', 'mpBonus', 'attackSpeedBonus', 'criticalBonus', 'dodgeBonus'].some(field =>
+        item[field] !== undefined && (
+          typeof item[field] !== 'number' ||
+          !Number.isFinite(item[field]) ||
+          (item[field] as number) < 0 ||
+          (item[field] as number) > 1000
+        )
+      )
     ) return false
     itemIds.add(item.id)
   }

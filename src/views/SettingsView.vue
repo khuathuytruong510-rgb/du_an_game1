@@ -1,6 +1,30 @@
 <template>
   <div class="settings-view">
     <h2>Cài đặt Game</h2>
+    <section class="profile-panel">
+      <h3>Hồ sơ nhân vật</h3>
+      <label for="player-name">
+        Tên nhân vật
+        <input
+          id="player-name"
+          v-model="profileName"
+          type="text"
+          minlength="2"
+          maxlength="24"
+          autocomplete="nickname"
+        />
+      </label>
+      <div class="avatar-picker" role="radiogroup" aria-label="Chọn avatar">
+        <label v-for="avatar in avatarOptions" :key="avatar.id" :class="{ selected: profileAvatar === avatar.id }">
+          <input v-model="profileAvatar" type="radio" :value="avatar.id" :aria-label="avatar.name" name="profile-avatar" />
+          <img :src="avatar.src" :alt="avatar.name" />
+          <span>{{ avatar.name }}</span>
+        </label>
+      </div>
+      <button type="button" @click="saveProfile">Lưu hồ sơ</button>
+      <p v-if="profileStatus" role="status">{{ profileStatus }}</p>
+    </section>
+
     <section class="account-panel">
       <h3>Tài khoản & đồng bộ</h3>
       <div
@@ -109,7 +133,7 @@
 <script setup lang="ts">
 import { ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { usePlayerStore } from '../stores/player'
+import { PLAYER_AVATARS, usePlayerStore, type PlayerAvatar } from '../stores/player'
 
 const playerStore = usePlayerStore()
 const route = useRoute()
@@ -123,9 +147,23 @@ const password = ref('')
 const submitting = ref(false)
 const accountForm = ref<HTMLFormElement | null>(null)
 const accountFormStatus = ref('')
+const profileName = ref(playerStore.playerName)
+const profileAvatar = ref<PlayerAvatar>(playerStore.playerAvatar)
+const profileStatus = ref('')
+const avatarOptions = PLAYER_AVATARS
 
 const clearAccountFormStatus = () => {
   accountFormStatus.value = ''
+}
+
+const saveProfile = () => {
+  profileStatus.value = ''
+  if (!playerStore.setPlayerProfile(profileName.value, profileAvatar.value)) {
+    profileStatus.value = playerStore.settingsStatus
+    return
+  }
+  void playerStore.persistRemoteGame()
+  profileStatus.value = 'Đã lưu tên và avatar.'
 }
 
 const returnToRequestedRoute = async () => {
@@ -192,6 +230,72 @@ const confirmNewGame = () => {
   margin: 0 auto;
   color: #f2ead8;
   background: rgb(20 36 58 / 94%);
+}
+
+.profile-panel {
+  margin-bottom: 14px;
+  padding: 14px;
+  border: 1px solid #53677c;
+  border-radius: 9px;
+  background: #24364d;
+}
+
+.profile-panel h3 {
+  margin-top: 0;
+}
+
+.profile-panel label {
+  display: grid;
+  gap: 7px;
+}
+
+.profile-panel input[type='text'] {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 10px;
+  border: 1px solid #738398;
+  border-radius: 6px;
+  color: #172438;
+  background: #f2ead8;
+}
+
+.avatar-picker {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 10px;
+  margin-top: 10px;
+}
+
+.avatar-picker label {
+  place-items: center;
+  padding: 8px;
+  border: 2px solid #53677c;
+  border-radius: 10px;
+  background: #1a2a40;
+  cursor: pointer;
+}
+
+.avatar-picker label.selected {
+  border-color: #78dba2;
+  background: #31574b;
+}
+
+.avatar-picker input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+}
+
+.avatar-picker img {
+  width: 70px;
+  height: 82px;
+  object-fit: contain;
+}
+
+.avatar-picker span {
+  font-size: 12px;
+  text-align: center;
 }
 
 .account-panel {

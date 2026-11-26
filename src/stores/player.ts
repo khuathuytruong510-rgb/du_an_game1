@@ -9,15 +9,27 @@ import {
   type PlayerSaveData
 } from '../game/persistence/playerSave'
 import { GameApiError, gameApi } from '../game/persistence/gameApi'
+import { rollEquipmentRarity } from '../game/systems/equipmentLoot'
 import {
   isAutoPotionThreshold,
+  isMountId,
   loadGameSettings,
+  loadSelectedMount,
   writeGameSettings,
-  type AutoPotionThreshold
+  writeSelectedMount,
+  type AutoPotionThreshold,
+  type MountId
 } from '../game/persistence/gameSettings'
 
-export type EquipmentSlot = 'weapon' | 'armor'
-export type ItemRarity = 'Thường' | 'Tốt' | 'Hiếm'
+export type EquipmentSlot =
+  | 'weapon'
+  | 'helmet'
+  | 'armor'
+  | 'gloves'
+  | 'boots'
+  | 'ring'
+  | 'necklace'
+export type ItemRarity = 'Thường' | 'Tốt' | 'Hiếm' | 'Sử thi' | 'Huyền thoại'
 export const INVENTORY_CAPACITY = 20
 export const HEALING_POTION_PRICE = 20
 const MAX_STACK_SIZE = 999
@@ -31,6 +43,31 @@ export const EQUIPMENT_SHOP = {
     name: 'Giáp da tập sự',
     price: 60,
     bonus: 2
+  },
+  helmet: {
+    name: 'Mũ da tập sự',
+    price: 50,
+    bonus: 2
+  },
+  gloves: {
+    name: 'Găng tay tập sự',
+    price: 55,
+    bonus: 3
+  },
+  boots: {
+    name: 'Giày tập sự',
+    price: 55,
+    bonus: 2
+  },
+  ring: {
+    name: 'Nhẫn tập sự',
+    price: 70,
+    bonus: 3
+  },
+  necklace: {
+    name: 'Dây chuyền tập sự',
+    price: 70,
+    bonus: 3
   }
 } as const
 
@@ -43,9 +80,30 @@ export interface InventoryItem {
   slot?: EquipmentSlot
   attackBonus?: number
   defenseBonus?: number
+  hpBonus?: number
+  mpBonus?: number
+  attackSpeedBonus?: number
+  criticalBonus?: number
+  dodgeBonus?: number
   enhanceLevel?: number
   healAmount?: number
 }
+
+export const EQUIPMENT_SLOTS: Array<{ id: EquipmentSlot; label: string; icon: string }> = [
+  { id: 'weapon', label: 'Vũ khí', icon: '⚔' },
+  { id: 'helmet', label: 'Mũ', icon: '⛑' },
+  { id: 'armor', label: 'Áo giáp', icon: '🛡' },
+  { id: 'gloves', label: 'Găng tay', icon: '✋' },
+  { id: 'boots', label: 'Giày', icon: '👟' },
+  { id: 'ring', label: 'Nhẫn', icon: '💍' },
+  { id: 'necklace', label: 'Dây chuyền', icon: '◆' }
+]
+
+export type PlayerAvatar = 'hero-mushroom' | 'hero-scout'
+export const PLAYER_AVATARS: Array<{ id: PlayerAvatar; name: string; src: string }> = [
+  { id: 'hero-mushroom', name: 'Nấm Lùn', src: '/assets/hero-mushroom.svg' },
+  { id: 'hero-scout', name: 'Thám hiểm', src: '/assets/hero-scout.svg' }
+]
 
 export const getItemSellPrice = (item: InventoryItem): number => {
   if (item.type === 'material') return 2
@@ -74,17 +132,73 @@ export const usePlayerStore = defineStore('player', () => {
   const gold = ref(0)
   const hp = ref(100)
   const mp = ref(50)
+  const playerName = ref('Nấm Lùn')
+  const playerAvatar = ref<PlayerAvatar>('hero-mushroom')
   const autoBattle = ref(false)
   const autoPotionThreshold = ref<AutoPotionThreshold>(0.35)
+  const mountId = ref<MountId | null>(null)
   const inventory = ref<InventoryItem[]>([])
   const equipment = ref<Partial<Record<EquipmentSlot, InventoryItem>>>({})
-  const attackPower = computed(() => 10 + (equipment.value.weapon?.attackBonus ?? 0))
+  const attackPower = computed(() =>
+    10 +
+    (equipment.value.weapon?.attackBonus ?? 0) +
+    (equipment.value.gloves?.attackBonus ?? 0) +
+    (equipment.value.ring?.attackBonus ?? 0)
+  )
   const defensePower = computed(() => {
-    const armor = equipment.value.armor
-    return armor?.defenseBonus ?? armor?.attackBonus ?? 0
+    return Object.values(equipment.value).reduce(
+      (total, item) => total + (
+        item?.defenseBonus ??
+        (item?.slot === 'armor' ? item.attackBonus ?? 0 : 0)
+      ),
+      0
+    )
   })
-  const maxHp = computed(() => Math.min(100 + (level.value - 1) * 10, 200))
-  const maxMp = computed(() => Math.min(50 + (level.value - 1) * 5, 150))
+  const maxHp = computed(() =>
+    Math.min(
+      100 + (level.value - 1) * 10 +
+      Object.values(equipment.value).reduce(
+        (total, item) => total + (item?.hpBonus ?? 0),
+        0
+      ),
+      1000
+    )
+  )
+  const maxMp = computed(() =>
+    Math.min(
+      50 + (level.value - 1) * 5 +
+      Object.values(equipment.value).reduce(
+        (total, item) => total + (item?.mpBonus ?? 0),
+        0
+      ),
+      500
+    )
+  )
+  const attackSpeed = computed(() =>
+    Object.values(equipment.value).reduce(
+      (total, item) => total + (item?.attackSpeedBonus ?? 0),
+      0
+    )
+  )
+  const criticalChance = computed(() =>
+    Math.min(
+      0.1 +
+      Object.values(equipment.value).reduce(
+        (total, item) => total + (item?.criticalBonus ?? 0),
+        0
+      ),
+      0.75
+    )
+  )
+  const dodgeChance = computed(() =>
+    Math.min(
+      Object.values(equipment.value).reduce(
+        (total, item) => total + (item?.dodgeBonus ?? 0),
+        0
+      ),
+      0.5
+    )
+  )
   const createQuests = (): Quest[] => [
     {
       id: 'slime-hunt',
@@ -183,6 +297,43 @@ export const usePlayerStore = defineStore('player', () => {
     return true
   }
 
+  const setMount = (id: MountId | null): boolean => {
+    if (id !== null && !isMountId(id)) {
+      settingsStatus.value = 'Thú cưỡi không hợp lệ.'
+      return false
+    }
+
+    const error = writeSelectedMount(id)
+    if (error) {
+      settingsStatus.value = error
+      return false
+    }
+
+    mountId.value = id
+    settingsStatus.value = id
+      ? 'Đã lưu thú cưỡi trên thiết bị này.'
+      : 'Đã tháo thú cưỡi.'
+    return true
+  }
+
+  const setPlayerProfile = (name: string, avatar: PlayerAvatar): boolean => {
+    const normalizedName = name.trim().replace(/\s+/g, ' ')
+    if (normalizedName.length < 2 || normalizedName.length > 24) {
+      settingsStatus.value = 'Tên nhân vật phải từ 2 đến 24 ký tự.'
+      return false
+    }
+    if (!PLAYER_AVATARS.some(candidate => candidate.id === avatar)) {
+      settingsStatus.value = 'Avatar không hợp lệ.'
+      return false
+    }
+
+    playerName.value = normalizedName
+    playerAvatar.value = avatar
+    settingsStatus.value = 'Đã lưu hồ sơ nhân vật.'
+    persistGame()
+    return true
+  }
+
   const gainExp = (amount: number) => {
     if (!Number.isFinite(amount) || amount <= 0 || level.value >= 30) return
 
@@ -193,6 +344,8 @@ export const usePlayerStore = defineStore('player', () => {
     }
 
     if (level.value >= 30) exp.value = 0
+    persistGame()
+    if (accountEmail.value) void persistRemoteGame()
   }
 
   const regenerateMp = (amount: number) => {
@@ -205,6 +358,8 @@ export const usePlayerStore = defineStore('player', () => {
     const mitigatedDamage = Math.max(1, amount - defensePower.value)
     const actualDamage = Math.min(hp.value, mitigatedDamage)
     hp.value -= actualDamage
+    persistGame()
+    if (accountEmail.value) void persistRemoteGame()
     return actualDamage
   }
 
@@ -241,6 +396,8 @@ export const usePlayerStore = defineStore('player', () => {
       if (quest) quest.progress = Math.min(quest.required, quest.progress + item.quantity)
     }
     lootMessage.value = `Nhặt được ${item.name}${item.quantity > 1 ? ` x${item.quantity}` : ''}`
+    persistGame()
+    if (accountEmail.value) void persistRemoteGame()
     return true
   }
 
@@ -248,6 +405,50 @@ export const usePlayerStore = defineStore('player', () => {
     ...item,
     id: `item-${nextItemId++}`
   })
+
+  const createLootEquipment = (monsterKind: 'slime' | 'wolf' | 'goblin' | 'boss'): InventoryItem => {
+    const slots: EquipmentSlot[] = ['weapon', 'helmet', 'armor', 'gloves', 'boots', 'ring', 'necklace']
+    const slot = slots[Math.floor(Math.random() * slots.length)]
+    const roll = Math.random()
+    const rarity: ItemRarity = rollEquipmentRarity(monsterKind, roll)
+    const rarityBonus = { 'Thường': 1, 'Tốt': 2, 'Hiếm': 4, 'Sử thi': 7, 'Huyền thoại': 10 }[rarity]
+    const levelBonus = 1 + Math.floor(level.value / 5)
+    const bonus = rarityBonus * levelBonus
+    const names: Record<EquipmentSlot, string> = {
+      weapon: 'Kiếm',
+      helmet: 'Mũ',
+      armor: 'Áo giáp',
+      gloves: 'Găng tay',
+      boots: 'Giày',
+      ring: 'Nhẫn',
+      necklace: 'Dây chuyền'
+    }
+    const common = {
+      name: `${rarity} ${names[slot]}`,
+      type: 'equipment' as const,
+      rarity,
+      quantity: 1,
+      slot,
+      enhanceLevel: 0
+    }
+    if (slot === 'weapon' || slot === 'gloves') {
+      return createItem({ ...common, attackBonus: bonus })
+    }
+    if (slot === 'helmet' || slot === 'armor') {
+      return createItem({
+        ...common,
+        defenseBonus: bonus,
+        hpBonus: slot === 'armor' ? bonus * 5 : 0
+      })
+    }
+    if (slot === 'boots') {
+      return createItem({ ...common, dodgeBonus: Math.min(0.5, bonus * 0.01), attackSpeedBonus: bonus })
+    }
+    if (slot === 'ring') {
+      return createItem({ ...common, criticalBonus: Math.min(0.75, bonus * 0.01), attackBonus: Math.ceil(bonus / 2) })
+    }
+    return createItem({ ...common, hpBonus: bonus * 5, mpBonus: bonus * 3, defenseBonus: Math.ceil(bonus / 2) })
+  }
 
   const removeItem = (itemId: string) => {
     inventory.value = inventory.value.filter(item => item.id !== itemId)
@@ -279,6 +480,8 @@ export const usePlayerStore = defineStore('player', () => {
       item.quantity -= sellQuantity
     }
     autoMessage.value = `Đã bán ${item.name} x${sellQuantity} · nhận ${value} vàng`
+    persistGame()
+    if (accountEmail.value) void persistRemoteGame()
     return true
   }
 
@@ -319,6 +522,8 @@ export const usePlayerStore = defineStore('player', () => {
 
     gold.value -= totalPrice
     autoMessage.value = `Đã mua Thuốc hồi phục x${quantity} · -${totalPrice} vàng`
+    persistGame()
+    if (accountEmail.value) void persistRemoteGame()
     return true
   }
 
@@ -339,9 +544,17 @@ export const usePlayerStore = defineStore('player', () => {
       rarity: 'Tốt',
       quantity: 1,
       slot,
-      ...(slot === 'weapon'
+      ...(slot === 'weapon' || slot === 'gloves'
         ? { attackBonus: stock.bonus }
-        : { defenseBonus: stock.bonus })
+        : slot === 'helmet'
+          ? { defenseBonus: stock.bonus }
+          : slot === 'armor'
+            ? { defenseBonus: stock.bonus, hpBonus: stock.bonus * 5 }
+            : slot === 'boots'
+              ? { dodgeBonus: stock.bonus * 0.01, attackSpeedBonus: stock.bonus }
+              : slot === 'ring'
+                ? { attackBonus: stock.bonus, criticalBonus: stock.bonus * 0.01 }
+                : { hpBonus: stock.bonus * 5, mpBonus: stock.bonus * 3 })
     })
     if (!addItem(item)) {
       autoMessage.value = 'Không thể thêm trang bị vào túi đồ'
@@ -350,6 +563,8 @@ export const usePlayerStore = defineStore('player', () => {
 
     gold.value -= stock.price
     autoMessage.value = `Đã mua ${stock.name} · -${stock.price} vàng`
+    persistGame()
+    if (accountEmail.value) void persistRemoteGame()
     return true
   }
 
@@ -357,12 +572,22 @@ export const usePlayerStore = defineStore('player', () => {
     const index = inventory.value.findIndex(item => item.id === itemId)
     const item = inventory.value[index]
     if (index < 0 || item?.type !== 'equipment' || !item.slot) return false
+    if (![
+      'weapon', 'helmet', 'armor', 'gloves', 'boots', 'ring', 'necklace'
+    ].includes(item.slot)) {
+      autoMessage.value = 'Vị trí trang bị không hợp lệ'
+      return false
+    }
 
     inventory.value.splice(index, 1)
     const previousItem = equipment.value[item.slot]
     equipment.value[item.slot] = item
     if (previousItem) inventory.value.push(previousItem)
+    hp.value = Math.min(hp.value, maxHp.value)
+    mp.value = Math.min(mp.value, maxMp.value)
     autoMessage.value = `Đã trang bị ${item.name}`
+    persistGame()
+    if (accountEmail.value) void persistRemoteGame()
     return true
   }
 
@@ -379,7 +604,11 @@ export const usePlayerStore = defineStore('player', () => {
 
     inventory.value.push(item)
     delete equipment.value[slot]
+    hp.value = Math.min(hp.value, maxHp.value)
+    mp.value = Math.min(mp.value, maxMp.value)
     autoMessage.value = `Đã tháo ${item.name}`
+    persistGame()
+    if (accountEmail.value) void persistRemoteGame()
     return true
   }
 
@@ -402,6 +631,8 @@ export const usePlayerStore = defineStore('player', () => {
     item.quantity--
     if (item.quantity <= 0) removeItem(itemId)
     autoMessage.value = `Đã dùng ${item.name} · hồi ${item.healAmount} HP`
+    persistGame()
+    if (accountEmail.value) void persistRemoteGame()
     return true
   }
 
@@ -515,6 +746,8 @@ export const usePlayerStore = defineStore('player', () => {
   const getSaveData = (): PlayerSaveData => ({
     version: 1,
     savedAt: new Date().toISOString(),
+    playerName: playerName.value,
+    avatar: playerAvatar.value,
     level: level.value,
     exp: exp.value,
     gold: gold.value,
@@ -526,6 +759,12 @@ export const usePlayerStore = defineStore('player', () => {
   })
 
   const restoreSaveData = (data: PlayerSaveData) => {
+    playerName.value =
+      typeof data.playerName === 'string' && data.playerName.trim()
+        ? data.playerName.trim().slice(0, 24)
+        : 'Nấm Lùn'
+    playerAvatar.value =
+      data.avatar === 'hero-scout' ? 'hero-scout' : 'hero-mushroom'
     level.value = data.level
     exp.value = data.exp
     gold.value = data.gold
@@ -552,8 +791,10 @@ export const usePlayerStore = defineStore('player', () => {
 
   const initializeGame = () => {
     const settings = loadGameSettings()
+    const mountSettings = loadSelectedMount()
     autoPotionThreshold.value = settings.autoPotionThreshold
-    settingsStatus.value = settings.error ?? ''
+    mountId.value = mountSettings.mountId
+    settingsStatus.value = [settings.error, mountSettings.error].filter(Boolean).join(' ')
 
     const result = loadPlayerSave()
     if (result.status === 'invalid') {
@@ -735,6 +976,8 @@ export const usePlayerStore = defineStore('player', () => {
     gold.value = 0
     hp.value = 100
     mp.value = 50
+    playerName.value = 'Nấm Lùn'
+    playerAvatar.value = 'hero-mushroom'
     autoBattle.value = false
     inventory.value = []
     equipment.value = {}
@@ -749,6 +992,8 @@ export const usePlayerStore = defineStore('player', () => {
   }
 
   return {
+    playerName,
+    playerAvatar,
     level,
     exp,
     gold,
@@ -756,12 +1001,16 @@ export const usePlayerStore = defineStore('player', () => {
     mp,
     autoBattle,
     autoPotionThreshold,
+    mountId,
     inventory,
     equipment,
     attackPower,
     defensePower,
     maxHp,
     maxMp,
+    attackSpeed,
+    criticalChance,
+    dodgeChance,
     quests,
     autoState,
     currentTarget,
@@ -788,12 +1037,15 @@ export const usePlayerStore = defineStore('player', () => {
     clearTargetState,
     setAutoBattle,
     setAutoPotionThreshold,
+    setMount,
+    setPlayerProfile,
     gainExp,
     regenerateMp,
     takeDamage,
     restoreHealth,
     addItem,
     createItem,
+    createLootEquipment,
     removeItem,
     sellItem,
     buyHealingPotion,

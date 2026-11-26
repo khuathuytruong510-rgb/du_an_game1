@@ -87,8 +87,14 @@ export const emitTouchMovement = (direction: TouchDirection, pressed: boolean) =
 
 export const emitGameEvent = (
   event:
-    | 'platform:move'
-    | 'platform:pause'
+    | 'combat:attack'
+    | 'combat:skill'
+    | 'combat:item'
+    | 'combat:auto'
+    | 'combat:target'
+    | 'combat:pause'
+    | 'combat:reset'
+    | 'mount:change'
     | 'auto:toggle'
     | 'manual:attack'
     | 'manual:skill'
@@ -98,8 +104,7 @@ export const emitGameEvent = (
     | 'target:approach:cancel',
   payload?: unknown
 ) => {
-  if (event === 'platform:pause') game?.events.emit(event)
-  else game?.events.emit(event, payload)
+  game?.events.emit(event, payload)
 }
 
 export const destroyGame = () => {

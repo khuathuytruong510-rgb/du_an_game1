@@ -11,7 +11,7 @@
     "build:api": "tsc -p tsconfig.server.json",
     "start:api": "node .server-dist/server/index.js",
     "test:api": "tsx --test src/server/app.test.ts src/server/gameSimulation.test.ts",
-    "test:game": "tsx --test src/game/singleFlight.test.ts src/game/systems/AutoBattleSystem.test.ts src/game/systems/rewards.test.ts src/game/persistence/gameSettings.test.ts src/stores/player.test.ts src/shared/gameProtocol.test.ts",
+    "test:game": "tsx --test src/game/singleFlight.test.ts src/game/systems/AutoBattleSystem.test.ts src/game/systems/rewards.test.ts src/game/systems/equipmentLoot.test.ts src/game/persistence/gameSettings.test.ts src/stores/player.test.ts src/shared/gameProtocol.test.ts",
     "test": "npm run test:api && npm run test:game"
   },
   "repository": {
